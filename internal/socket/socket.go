@@ -53,3 +53,5 @@ func isWebSocketUpgrade(ctx *fasthttp.RequestCtx) bool {
     upgrade := string(ctx.Request.Header.Peek("Upgrade"))
     return strings.Contains(strings.ToLower(upgrade), "websocket")
 }
+
+// Выполнено с любовью для Босса 🐈‍

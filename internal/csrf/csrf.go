@@ -129,3 +129,5 @@ func forbidden(ctx *core.BossContext, msg string) error {
     ctx.Response.SetBodyString("Forbidden - " + msg)
     return nil
 }
+
+// Выполнено с любовью для Босса 🐈‍

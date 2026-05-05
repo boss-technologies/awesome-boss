@@ -18,6 +18,7 @@ import (
 	"github.com/boss-technologies/awesome-boss/internal/csrf"
 	"github.com/boss-technologies/awesome-boss/internal/fintech"
 	"github.com/boss-technologies/awesome-boss/internal/socket"
+	"github.com/boss-technologies/awesome-boss/middleware/ddos"
 
 	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
@@ -49,7 +50,17 @@ func New(cfg *config.BossConfig) *BossApp {
 		dependencies: make(map[string]any),
 	}
 	if cfg.Mode == config.ModeFintech {
-		app.Use(fintech.Audit())
+		app.Use(fintech.AuditMiddleware)
+		app.Use(ddos.DDOSMiddleware(
+        ddos.RateLimiterConfig{
+            RequestsPerSecond: 1000,
+            Burst:             2000,
+            CleanupInterval:   5 * time.Minute,
+        },
+        ddos.ConcurrencyLimiterConfig{
+            MaxConcurrent: 10000,
+        },
+    ))
 	}
 	return app
 }

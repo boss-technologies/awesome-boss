@@ -7,11 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"github.com/boss-technologies/awesome-boss/internal/auth"
+	"github.com/boss-technologies/awesome-boss/auth"
 )
 
 // ---------- ВЕРСИЯ ----------
-const version = "0.2.0"
+const version = "0.3.0"
 
 // ---------- ОСНОВНАЯ ФУНКЦИЯ (диспетчер команд) ----------
 func main() {
@@ -42,7 +42,7 @@ func main() {
 
 // ---------- ВЫВОД СПРАВКИ ----------
 func printUsage() {
-	fmt.Println(`🐱 Awesome Boss CLI v0.2.0
+	fmt.Println(`🐱 Awesome Boss CLI v0.3.0
 
 Использование:
   boss <команда> [аргументы]

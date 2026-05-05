@@ -1,10 +1,10 @@
-package fintech
+package requireauth
 
 import (
     "strings"
 
-    "github.com/boss-technologies/awesome-boss/core"          // правильный импорт
-    "github.com/boss-technologies/awesome-boss/internal/auth" // внутренний пакет
+    "github.com/boss-technologies/awesome-boss/core"
+    "github.com/boss-technologies/awesome-boss/auth"
 )
 
 // RequireAuth возвращает middleware, требующее валидный BAT-токен.
