@@ -21,10 +21,11 @@ type BossConfig struct {
 }
 
 type ServerConfig struct {
-    Port         int           `toml:"port"`
-    ReadTimeout  time.Duration `toml:"read_timeout"`
-    WriteTimeout time.Duration `toml:"write_timeout"`
-    EnableGzip   bool          `toml:"enable_gzip"`
+    Port          int           `toml:"port"`
+    ReadTimeout   time.Duration `toml:"read_timeout"`
+    WriteTimeout  time.Duration `toml:"write_timeout"`
+    EnableGzip    bool          `toml:"enable_gzip"`
+    EnableHTTP2   bool          `toml:"enable_http2"`
 }
 
 type AuthConfig struct {

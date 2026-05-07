@@ -7,11 +7,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+
 	"github.com/boss-technologies/awesome-boss/auth"
+	"github.com/boss-technologies/awesome-boss/internal/bossq"
 )
 
 // ---------- ВЕРСИЯ ----------
-const version = "0.3.0"
+const version = "0.4.0"
 
 // ---------- ОСНОВНАЯ ФУНКЦИЯ (диспетчер команд) ----------
 func main() {
@@ -33,6 +37,8 @@ func main() {
 		handleRun()
 	case "version":
 		handleVersion()
+	case "make":
+		handleMakeModels()
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", command)
 		printUsage()
@@ -42,14 +48,15 @@ func main() {
 
 // ---------- ВЫВОД СПРАВКИ ----------
 func printUsage() {
-	fmt.Println(`🐱 Awesome Boss CLI v0.3.0
+	fmt.Println(`🐱 Awesome Boss CLI v0.4.0
 
 Использование:
   boss <команда> [аргументы]
 
 Доступные команды:
   build       Собрать проект в оптимизированный бинарник
-  generate    Генерировать артефакты (ключи, модели)
+  generate    Генерировать артефакты (ключи, модели, миграции)
+  make        Сгенерировать код моделий с помощью BossQ
   new         Создать новый проект
   run         Запустить сервер с горячей перезагрузкой
   version     Показать версию
@@ -95,19 +102,19 @@ func handleBuild(args []string) {
 	fmt.Printf("✅ Сборка завершена: %s\n", outName)
 }
 
-// ---------- 2. КОМАНДА generate (с подкомандой key) ----------
+// ---------- 2. КОМАНДА generate (с подкомандами key, migration) ----------
 func handleGenerate(args []string) {
 	if len(args) == 0 {
-		fmt.Println("❌ Укажите подкоманду: boss generate key")
+		fmt.Println("❌ Укажите подкоманду: boss generate key|migration")
 		os.Exit(1)
 	}
-	subCmd := args[0]
-	switch subCmd {
+	switch args[0] {
 	case "key":
 		handleGenerateKey(args[1:])
+	case "migration":
+		handleGenerateMigration(args[1:])
 	default:
-		fmt.Printf("❌ Неизвестная подкоманда: %s\n", subCmd)
-		fmt.Println("Доступные: key")
+		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
 		os.Exit(1)
 	}
 }
@@ -117,7 +124,6 @@ func handleGenerateKey(args []string) {
 	jsonFlag := fs.Bool("json", false, "вывод в JSON формате (опционально)")
 	fs.Parse(args)
 
-	// Вызываем твой пакет auth (он должен существовать)
 	hexKey, err := auth.GenerateSecretKey()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Ошибка генерации ключа: %v\n", err)
@@ -133,7 +139,61 @@ func handleGenerateKey(args []string) {
 	}
 }
 
-// ---------- 3. КОМАНДА new ----------
+func handleGenerateMigration(args []string) {
+	if len(args) == 0 {
+		fmt.Println("❌ Укажите название миграции: boss generate migration <имя>")
+		os.Exit(1)
+	}
+	migrationName := args[0]
+
+	// Папка для миграций
+	migrationsDir := "migrations"
+
+	// Создаём папку, если её ещё нет
+	if err := os.MkdirAll(migrationsDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Не удалось создать директорию миграций: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Определяем следующий номер версии
+	nextVersion := getNextMigrationVersion(migrationsDir)
+
+	// Формируем имена файлов
+	versionStr := fmt.Sprintf("%06d", nextVersion)
+	upFile := filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.up.sql", versionStr, migrationName))
+	downFile := filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.down.sql", versionStr, migrationName))
+
+	// Шаблоны содержимого
+	upContent := fmt.Sprintf("-- Миграция %s: %s (UP)\n", versionStr, migrationName)
+	downContent := fmt.Sprintf("-- Миграция %s: %s (DOWN)\n", versionStr, migrationName)
+
+	// Записываем файлы
+	if err := os.WriteFile(upFile, []byte(upContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка создания файла %s: %v\n", upFile, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(downFile, []byte(downContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка создания файла %s: %v\n", downFile, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✅ Созданы миграции:\n")
+	fmt.Printf("   📄 %s\n", upFile)
+	fmt.Printf("   📄 %s\n", downFile)
+}
+
+// ---------- 3. КОМАНДА make ----------
+
+func handleMakeModels() {
+	fmt.Println("🔍 BossQ сканирует модели...")
+	if err := bossq.Generate("."); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка генерации: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✅ BossQ сгенерировал Store-файлы!")
+}
+
+// ---------- 4. КОМАНДА new ----------
 func handleNew(args []string) {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
 	template := fs.String("t", "normal", "Шаблон проекта (normal, fintech)")
@@ -174,7 +234,7 @@ func handleNew(args []string) {
 	fmt.Println("/\\ /\\ Awesome Boss🐱")
 }
 
-// ---------- 4. КОМАНДА run ----------
+// ---------- 5. КОМАНДА run ----------
 func handleRun() {
 	// Проверяем, есть ли main.go
 	if _, err := os.Stat("main.go"); os.IsNotExist(err) {
@@ -204,13 +264,13 @@ func handleRun() {
 	}
 }
 
-// ---------- 5. КОМАНДА version ----------
+// ---------- 6. КОМАНДА version ----------
 func handleVersion() {
 	fmt.Printf("Awesome Boss и Boss CLI версия: %s\n", version)
 	fmt.Printf("Версия Go: %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
-// ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (перенесены из original) ----------
+// ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
 
 func getExeSuffix() string {
 	if runtime.GOOS == "windows" {
@@ -483,4 +543,35 @@ func main() {
     log.Fatal(app.Run(addr))
 }
 `
+}
+
+// getNextMigrationVersion сканирует папку с миграциями и возвращает следующий номер.
+// Имена файлов должны быть в формате "число_*.*", подходящем для golang-migrate.
+func getNextMigrationVersion(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 1
+	}
+
+	maxVersion := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		// Ищем префикс до первого подчёркивания
+		underscoreIndex := strings.Index(name, "_")
+		if underscoreIndex <= 0 {
+			continue
+		}
+		versionStr := name[:underscoreIndex]
+		version, err := strconv.Atoi(versionStr)
+		if err != nil {
+			continue
+		}
+		if version > maxVersion {
+			maxVersion = version
+		}
+	}
+	return maxVersion + 1
 }
