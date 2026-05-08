@@ -37,9 +37,9 @@ func NewIPRateLimiter(cfg RateLimiterConfig) *IPRateLimiter {
 
 // getLimiter возвращает лимитер для IP
 func (l *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
-    lim := rate.NewLimiter(rate.Limit(l.cfg.RequestsPerSecond), l.cfg.Burst)
-    actual, _ := l.limiters.LoadOrStore(ip, lim)
-    return actual.(*rate.Limiter)
+	lim := rate.NewLimiter(rate.Limit(l.cfg.RequestsPerSecond), l.cfg.Burst)
+	actual, _ := l.limiters.LoadOrStore(ip, lim)
+	return actual.(*rate.Limiter)
 }
 
 // Allow проверяет, разрешён ли запрос с данного IP
@@ -52,7 +52,7 @@ func (l *IPRateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(l.cfg.CleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		l.limiters.Range(func(key, value interface{}) bool {
+		l.limiters.Range(func(key, value any) bool {
 			lim := value.(*rate.Limiter)
 			// Если лимитер не использовался последние CleanupInterval, удаляем
 			// Для простоты удаляем все, у которых резерв (burst) полон.

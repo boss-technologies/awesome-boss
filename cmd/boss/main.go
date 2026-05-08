@@ -185,12 +185,22 @@ func handleGenerateMigration(args []string) {
 // ---------- 3. КОМАНДА make ----------
 
 func handleMakeModels() {
-	fmt.Println("🔍 BossQ сканирует модели...")
-	if err := bossq.Generate("."); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка генерации: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("✅ BossQ сгенерировал Store-файлы!")
+    // 1. Определяем рабочую директорию - откуда мы запускаем команду.
+    dir, err := os.Getwd()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Не могу определить текущую папку: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Printf("🔍 BossQ сканирует модели в '%s'...\n", dir)
+    
+    // 2. Вызываем генератор, передавая ему ТЕКУЩУЮ ДИРЕКТОРИЮ.
+    if err := bossq.Generate(dir); err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Ошибка генерации: %v\n", err)
+        os.Exit(1)
+    }
+    
+    fmt.Println("✅ BossQ сгенерировал Store-файлы!")
 }
 
 // ---------- 4. КОМАНДА new ----------

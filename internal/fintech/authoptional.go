@@ -17,7 +17,7 @@ func AuthOptional(secretKeyHex string) core.Middleware {
             if len(parts) == 2 && parts[0] == "Bearer" {
                 userID, err := auth.ValidateToken(secretKeyHex, parts[1])
                 if err == nil {
-                    ctx.User = userID // пользователь опознан
+                    ctx.SetUserID(userID) // пользователь опознан
                 }
             }
             return next(ctx)

@@ -27,7 +27,7 @@ func RequireAuth(secretKeyHex string) core.Middleware {
                 return ctx.JSON(401, map[string]string{"error": "invalid token"})
             }
 
-            ctx.User = userID
+            ctx.SetUserID(userID)
             return next(ctx)
         }
     }

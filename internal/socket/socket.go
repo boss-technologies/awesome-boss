@@ -1,3 +1,4 @@
+// socket.go
 package bosssocket
 
 import (
@@ -9,20 +10,19 @@ import (
     "github.com/valyala/fasthttp"
 )
 
-// WebSocketHandlerFunc — тип функции обработчика соединения.
-type WebSocketHandlerFunc func(conn net.Conn)
+type WebSocketHandlerFunc func(net.Conn)
+
+var bufferPool = NewFixedBufferPool(4096, 65536) // Буферы от 4KB до 64KB
 
 func WebSocketHandler(handler WebSocketHandlerFunc) fasthttp.RequestHandler {
     bs := &BossSocket{handler: handler}
     return bs.UpgradeHandler()
 }
 
-// BossSocket — внутренняя структура.
 type BossSocket struct {
     handler WebSocketHandlerFunc
 }
 
-// UpgradeHandler возвращает fasthttp.RequestHandler.
 func (bs *BossSocket) UpgradeHandler() fasthttp.RequestHandler {
     return func(ctx *fasthttp.RequestCtx) {
         if !isWebSocketUpgrade(ctx) {
@@ -33,8 +33,7 @@ func (bs *BossSocket) UpgradeHandler() fasthttp.RequestHandler {
         ctx.Hijack(func(conn net.Conn) {
             defer conn.Close()
 
-            _, err := ws.Upgrade(conn)
-            if err != nil {
+            if _, err := ws.Upgrade(conn); err != nil {
                 log.Printf("WebSocket upgrade error: %v", err)
                 return
             }
@@ -44,7 +43,6 @@ func (bs *BossSocket) UpgradeHandler() fasthttp.RequestHandler {
     }
 }
 
-// isWebSocketUpgrade проверяет заголовки.
 func isWebSocketUpgrade(ctx *fasthttp.RequestCtx) bool {
     connection := string(ctx.Request.Header.Peek("Connection"))
     if !strings.Contains(strings.ToLower(connection), "upgrade") {

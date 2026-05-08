@@ -2,10 +2,15 @@ package core
 
 import (
 	"encoding/json"
-	"github.com/valyala/fasthttp"
+	"fmt"
 	"maps"
+	"strings"
 	"sync"
-    "github.com/mailru/easyjson"
+	"mime/multipart"
+
+	"github.com/boss-technologies/awesome-boss/auth"
+	"github.com/mailru/easyjson"
+	"github.com/valyala/fasthttp"
 )
 
 // fastMarshal пытается использовать easyjson, если тип поддерживает,
@@ -31,7 +36,7 @@ func fastUnmarshal(data []byte, v any) error {
 // BossContext — контекст запроса. User пока interface{} (будет типизирован через утилиты)
 type BossContext struct {
 	*fasthttp.RequestCtx
-	User  any
+	User  *auth.User
 	Store map[string]any
 	mu    sync.RWMutex
 }
@@ -130,11 +135,37 @@ func BindJSON[T any](c *BossContext) (T, error) {
     return result, err
 }
 
+// SetUserID сохраняет идентификатор пользователя (из BAT) в контексте.
+func (c *BossContext) SetUserID(id string) {
+    c.Set("bat_user_id", id)
+}
 
-// UserTyped возвращает User как конкретный тип
-func UserTyped[T any](c *BossContext) (T, bool) {
-	u, ok := c.User.(T)
-	return u, ok
+// GetUserID извлекает сохранённый идентификатор.
+func (c *BossContext) GetUserID() (string, bool) {
+    return GetTyped[string](c, "bat_user_id")
+}
+
+func (c *BossContext) FormFile(key string) (*multipart.FileHeader, error) {
+    // 1. Проверяем, что запрос действительно multipart.
+    contentType := string(c.Request.Header.ContentType())
+    if !strings.HasPrefix(contentType, "multipart/form-data") {
+        return nil, fmt.Errorf("запрос не является multipart/form-data")
+    }
+
+    // 2. Получаем разобранную форму (fasthttp сам парсит multipart).
+    form, err := c.Request.MultipartForm()
+    if err != nil {
+        return nil, fmt.Errorf("ошибка разбора multipart формы: %w", err)
+    }
+
+    // 3. Ищем файл по ключу.
+    files, ok := form.File[key]
+    if !ok || len(files) == 0 {
+        return nil, fmt.Errorf("файл с ключом '%s' не найден", key)
+    }
+
+    // 4. Возвращаем первый файл (обычно отправляют один).
+    return files[0], nil
 }
 
 // Выполнено с любовью для Босса 🐈

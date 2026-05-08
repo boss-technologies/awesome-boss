@@ -21,7 +21,19 @@ type ModelInfo struct {
 	Fields    []FieldInfo
 	PKField   string
 	PKColumn  string
+	Relations []RelationInfo
 	Imports   []string
+	SourceFile string // путь к исходному файлу, чтобы сгенерировать рядом
+}
+
+// RelationInfo описывает одну связь модели.
+type RelationInfo struct {
+	Name       string
+	Type       string
+	Model      string
+	ForeignKey string // внешний ключ в целевой таблице (для HasMany) или имя поля в текущей модели (для BelongsTo)
+	References string // пока не используется
+	FKField    string // имя поля внешнего ключа в текущей модели (для BelongsTo)
 }
 
 // FieldInfo описывает одно поле модели.
@@ -46,15 +58,29 @@ func Generate(dir string) error {
 		return fmt.Errorf("parse dir %s: %w", dir, err)
 	}
 
+	// Сначала собираем все модели из всех файлов.
+	var allModels []ModelInfo
 	for _, pkg := range pkgs {
 		for fileName, file := range pkg.Files {
 			models := extractModels(file)
-			for _, model := range models {
-				model.Package = pkg.Name
-				if err := writeStoreFile(fileName, model); err != nil {
-					return fmt.Errorf("write store for %s: %w", model.ModelName, err)
-				}
+			for i := range models {
+				models[i].Package = pkg.Name
+				models[i].SourceFile = fileName // сохраняем путь к исходному файлу
 			}
+			allModels = append(allModels, models...)
+		}
+	}
+
+	// Строим карту по имени модели.
+	modelMap := make(map[string]ModelInfo, len(allModels))
+	for _, m := range allModels {
+		modelMap[m.ModelName] = m
+	}
+
+	// Генерируем store-файлы, передавая карту моделей.
+	for _, model := range allModels {
+		if err := writeStoreFile(model.SourceFile, model, modelMap); err != nil {
+			return fmt.Errorf("write store for %s: %w", model.ModelName, err)
 		}
 	}
 	return nil
@@ -79,8 +105,8 @@ func extractModels(file *ast.File) []ModelInfo {
 		if typeSpec.Comment != nil {
 			for _, comment := range typeSpec.Comment.List {
 				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
-				if strings.HasPrefix(text, "bossq:table=") {
-					tableName = strings.TrimPrefix(text, "bossq:table=")
+				if after, ok0 := strings.CutPrefix(text, "bossq:table="); ok0 {
+					tableName = after
 					break
 				}
 			}
@@ -104,8 +130,17 @@ func extractModels(file *ast.File) []ModelInfo {
 				Type: typeToString(field.Type),
 			}
 
+			// Обрабатываем тег
 			if field.Tag != nil {
 				tag := strings.Trim(field.Tag.Value, "`")
+				// Сначала проверяем, не является ли поле связью
+				relTag := extractRelationTag(tag)
+				if relTag.Type != "" {
+					relTag.Name = field.Names[0].Name
+					model.Relations = append(model.Relations, relTag)
+					continue // связь не попадает в список полей для SQL
+				}
+				// Обычное поле: парсим тег
 				fInfo.Tag = tag
 				fInfo.parseTag(tag)
 			}
@@ -130,7 +165,7 @@ func extractModels(file *ast.File) []ModelInfo {
 }
 
 // writeStoreFile генерирует файл *_bossq.go для одной модели.
-func writeStoreFile(originalFile string, model ModelInfo) error {
+func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]ModelInfo) error {
 	tmpl, err := template.New("store").Parse(storeTemplate)
 	if err != nil {
 		return err
@@ -160,6 +195,11 @@ func writeStoreFile(originalFile string, model ModelInfo) error {
 	if qbCode, err := genQueryBuilder(model); err == nil {
 		methods = append(methods, qbCode)
 	}
+	relMethods, err := genRelationMethods(model, allModels)
+	if err != nil {
+		return err
+	}
+	methods = append(methods, relMethods...)
 
 	data := struct {
 		Package   string
@@ -384,8 +424,8 @@ func (f *FieldInfo) parseTag(tag string) {
 	}
 	value := tag[start : start+end]
 
-	parts := strings.Split(value, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(value, ",")
+	for part := range parts {
 		part = strings.TrimSpace(part)
 		switch {
 		case part == "pk":
@@ -406,55 +446,189 @@ func (f *FieldInfo) parseTag(tag string) {
 }
 
 func genQueryBuilder(m ModelInfo) (string, error) {
-    // Генерируем методы для каждого поля
-    var fieldMethods []string
-    for _, f := range m.Fields {
-        data := map[string]string{
-            "ModelName":  m.ModelName,
-            "FieldName":  f.Name,
-            "FieldType":  f.Type,
-            "ColumnName": f.ColumnName,
-        }
-        // Генерируем Where и AndWhere
-        tmpl, _ := template.New("fieldWhere").Parse(fieldWhereMethod)
-        var buf bytes.Buffer
-        if err := tmpl.Execute(&buf, data); err != nil {
-            return "", err
-        }
-        fieldMethods = append(fieldMethods, buf.String())
-    }
+	// Генерируем методы для каждого поля
+	var fieldMethods []string
+	for _, f := range m.Fields {
+		data := map[string]string{
+			"ModelName":  m.ModelName,
+			"FieldName":  f.Name,
+			"FieldType":  f.Type,
+			"ColumnName": f.ColumnName,
+		}
+		// Генерируем Where и AndWhere
+		tmpl, _ := template.New("fieldWhere").Parse(fieldWhereMethod)
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return "", err
+		}
+		fieldMethods = append(fieldMethods, buf.String())
+	}
 
-    // Собираем полный код QueryBuilder
-    tmpl, err := template.New("queryBuilder").Parse(queryBuilderTemplate)
-    if err != nil {
-        return "", err
-    }
-    // Сформируем список всех полей для Scan (используем тот же ScanAll, что и в GetByID)
-    var allCols []string
-    for _, f := range m.Fields {
-        allCols = append(allCols, f.ColumnName)
-    }
-    scanAll := make([]string, len(m.Fields))
-    for i, f := range m.Fields {
-        scanAll[i] = "&m." + f.Name
-    }
+	// Собираем полный код QueryBuilder
+	tmpl, err := template.New("queryBuilder").Parse(queryBuilderTemplate)
+	if err != nil {
+		return "", err
+	}
+	// Сформируем список всех полей для Scan (используем тот же ScanAll, что и в GetByID)
+	var allCols []string
+	for _, f := range m.Fields {
+		allCols = append(allCols, f.ColumnName)
+	}
+	scanAll := make([]string, len(m.Fields))
+	for i, f := range m.Fields {
+		scanAll[i] = "&m." + f.Name
+	}
 
-    data := struct {
-        ModelName    string
-        TableName    string
-        FieldMethods []string
-        ScanAll      string
-    }{
-        ModelName:    m.ModelName,
-        TableName:    m.TableName,
-        FieldMethods: fieldMethods,
-        ScanAll:      strings.Join(scanAll, ", "),
-    }
-    var buf bytes.Buffer
-    if err := tmpl.Execute(&buf, data); err != nil {
-        return "", err
-    }
-    return buf.String(), nil
+	data := struct {
+		ModelName    string
+		TableName    string
+		FieldMethods []string
+		ScanAll      string
+	}{
+		ModelName:    m.ModelName,
+		TableName:    m.TableName,
+		FieldMethods: fieldMethods,
+		ScanAll:      strings.Join(scanAll, ", "),
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
-// Выполнено с любовью для Босса 🐈‍
+func extractRelationTag(tag string) RelationInfo {
+	start := strings.Index(tag, `bossq:"`)
+	if start == -1 {
+		return RelationInfo{}
+	}
+	start += len(`bossq:"`)
+	end := strings.Index(tag[start:], `"`)
+	if end == -1 {
+		return RelationInfo{}
+	}
+	value := tag[start : start+end]
+
+	if strings.HasPrefix(value, "hasMany:") {
+		parts := strings.Split(value[len("hasMany:"):], ".")
+		if len(parts) == 2 {
+			return RelationInfo{
+				Type:       "HasMany",
+				Model:      parts[0],
+				ForeignKey: parts[1], // Book.AuthorID -> ForeignKey = AuthorID
+			}
+		}
+	} else if strings.HasPrefix(value, "belongsTo:") {
+		// Разбираем модель и опциональный fk
+		rest := value[len("belongsTo:"):]
+		// Проверяем наличие скобок
+		modelName := rest
+		fkField := ""
+		if idx := strings.Index(rest, "("); idx != -1 {
+			modelName = rest[:idx]
+			// Извлекаем fk=... из скобок
+			after := rest[idx+1:]
+			if endIdx := strings.Index(after, ")"); endIdx != -1 {
+				opts := after[:endIdx]
+				for _, opt := range strings.Split(opts, ",") {
+					opt = strings.TrimSpace(opt)
+					if strings.HasPrefix(opt, "fk=") {
+						fkField = strings.TrimPrefix(opt, "fk=")
+					}
+				}
+			}
+		}
+		if fkField == "" {
+			fkField = modelName + "ID" // конвенция по умолчанию
+		}
+		return RelationInfo{
+			Type:    "BelongsTo",
+			Model:   modelName,
+			FKField: fkField,
+		}
+	}
+	return RelationInfo{}
+}
+
+// genRelationMethods генерирует код методов загрузки связей для модели.
+func genRelationMethods(model ModelInfo, allModels map[string]ModelInfo) ([]string, error) {
+	var methods []string
+	for _, rel := range model.Relations {
+		targetModel, ok := allModels[rel.Model]
+		if !ok {
+			return nil, fmt.Errorf("модель %q не найдена для связи %q", rel.Model, rel.Name)
+		}
+		switch rel.Type {
+		case "HasMany":
+			code, err := genHasManyMethod(model, rel, targetModel)
+			if err != nil {
+				return nil, err
+			}
+			methods = append(methods, code)
+		case "BelongsTo":
+			code, err := genBelongsToMethod(model, rel, targetModel)
+			if err != nil {
+				return nil, err
+			}
+			methods = append(methods, code)
+		}
+	}
+	return methods, nil
+}
+
+// genHasManyMethod генерирует метод Load<Relation> для загрузки слайса связанных объектов.
+func genHasManyMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (string, error) {
+	var scanFields []string
+	for _, f := range target.Fields {
+		scanFields = append(scanFields, "&item."+f.Name)
+	}
+	data := map[string]string{
+		"StoreName":    parent.StoreName,
+		"ModelName":    parent.ModelName,
+		"RelationName": rel.Name,
+		"TargetTable":  target.TableName,
+		"ForeignKey":   rel.ForeignKey,
+		"PKField":      parent.PKField,
+		"ScanFields":   strings.Join(scanFields, ", "),
+		"FieldType":    "[]" + rel.Model, // тип поля в родителе
+	}
+	tmpl, err := template.New("hasmany").Parse(loadHasManyTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// genBelongsToMethod генерирует метод Load<Relation> для загрузки одиночного связанного объекта.
+func genBelongsToMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (string, error) {
+	// scanFields для целевой модели
+	var scanFields []string
+	for _, f := range target.Fields {
+		scanFields = append(scanFields, "&item."+f.Name)
+	}
+	data := map[string]string{
+		"StoreName":    parent.StoreName,
+		"ModelName":    parent.ModelName,
+		"RelationName": rel.Name,
+		"TargetTable":  target.TableName,
+		"FKField":      rel.FKField,
+		"TargetPK":     target.PKField,
+		"ScanFields":   strings.Join(scanFields, ", "),
+		"TargetModel":  rel.Model,
+	}
+	tmpl, err := template.New("belongsTo").Parse(loadBelongsToTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// Выполнено с любовью для Босса 🐈

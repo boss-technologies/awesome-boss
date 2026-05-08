@@ -126,8 +126,6 @@ func (s *{{.StoreName}}) BulkInsert(ctx context.Context, items []{{.ModelName}})
 }
 `
 
-// templates.go (фрагмент)
-
 const queryBuilderTemplate = `
 // {{.ModelName}}QueryBuilder — типобезопасный построитель запросов для таблицы {{.TableName}}.
 type {{.ModelName}}QueryBuilder struct {
@@ -240,6 +238,49 @@ func (qb *{{.ModelName}}QueryBuilder) AndWhere{{.FieldName}}(op string, val {{.F
 	qb.where = append(qb.where, fmt.Sprintf("AND {{.ColumnName}} %s $%d", op, len(qb.args)+1))
 	qb.args = append(qb.args, val)
 	return qb
+}
+`
+
+const loadHasManyTemplate = `
+// Load{{.RelationName}} загружает все {{.RelationName}} для данной модели.
+func (s *{{.StoreName}}) Load{{.RelationName}}(ctx context.Context, m *{{.ModelName}}) error {
+    rows, err := s.pool.Query(ctx,
+        ` + "`SELECT * FROM {{.TargetTable}} WHERE {{.ForeignKey}} = $1`" + `,
+        m.{{.PKField}},
+    )
+    if err != nil {
+        return fmt.Errorf("load {{.RelationName}} for {{.ModelName}}: %w", err)
+    }
+    defer rows.Close()
+
+    m.{{.RelationName}} = make({{.FieldType}}, 0)
+    for rows.Next() {
+        var item {{.TargetModel}}
+        if err := rows.Scan({{.ScanFields}}); err != nil {
+            return err
+        }
+        m.{{.RelationName}} = append(m.{{.RelationName}}, item)
+    }
+    return rows.Err()
+}
+`
+
+const loadBelongsToTemplate = `
+// Load{{.RelationName}} загружает связанный {{.RelationName}} для модели.
+func (s *{{.StoreName}}) Load{{.RelationName}}(ctx context.Context, m *{{.ModelName}}) error {
+    if m.{{.FKField}} == 0 {
+        return nil // или ошибка, зависит от логики
+    }
+    var item {{.TargetModel}}
+    err := s.pool.QueryRow(ctx,
+        ` + "`SELECT * FROM {{.TargetTable}} WHERE {{.TargetPK}} = $1`" + `,
+        m.{{.FKField}},
+    ).Scan({{.ScanFields}})
+    if err != nil {
+        return fmt.Errorf("load {{.RelationName}} for {{.ModelName}}: %w", err)
+    }
+    m.{{.RelationName}} = &item
+    return nil
 }
 `
 
