@@ -15,7 +15,7 @@ import (
 )
 
 // ---------- ВЕРСИЯ ----------
-const version = "0.4.0"
+const version = "0.5.0"
 
 // ---------- ОСНОВНАЯ ФУНКЦИЯ (диспетчер команд) ----------
 func main() {
@@ -48,7 +48,7 @@ func main() {
 
 // ---------- ВЫВОД СПРАВКИ ----------
 func printUsage() {
-	fmt.Println(`🐱 Awesome Boss CLI v0.4.0
+	fmt.Println(`🐱 Awesome Boss CLI v0.5.0
 
 Использование:
   boss <команда> [аргументы]
