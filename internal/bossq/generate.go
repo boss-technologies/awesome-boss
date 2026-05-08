@@ -14,15 +14,15 @@ import (
 
 // ModelInfo хранит разобранную информацию о модели.
 type ModelInfo struct {
-	Package   string
-	ModelName string
-	StoreName string
-	TableName string
-	Fields    []FieldInfo
-	PKField   string
-	PKColumn  string
-	Relations []RelationInfo
-	Imports   []string
+	Package    string
+	ModelName  string
+	StoreName  string
+	TableName  string
+	Fields     []FieldInfo
+	PKField    string
+	PKColumn   string
+	Relations  []RelationInfo
+	Imports    []string
 	SourceFile string // путь к исходному файлу, чтобы сгенерировать рядом
 }
 
@@ -102,8 +102,15 @@ func extractModels(file *ast.File) []ModelInfo {
 		}
 
 		tableName := ""
-		if typeSpec.Comment != nil {
-			for _, comment := range typeSpec.Comment.List {
+		// Сначала смотрим в Doc (комментарий перед объявлением)
+		var commentGroup *ast.CommentGroup
+		if typeSpec.Doc != nil {
+			commentGroup = typeSpec.Doc
+		} else if typeSpec.Comment != nil {
+			commentGroup = typeSpec.Comment
+		}
+		if commentGroup != nil {
+			for _, comment := range commentGroup.List {
 				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
 				if after, ok0 := strings.CutPrefix(text, "bossq:table="); ok0 {
 					tableName = after
