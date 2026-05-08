@@ -56,7 +56,7 @@ func printUsage() {
 Доступные команды:
   build       Собрать проект в оптимизированный бинарник
   generate    Генерировать артефакты (ключи, модели, миграции)
-  make        Сгенерировать код моделий с помощью BossQ
+  make        Сгенерировать Store моделий с помощью BossQ
   new         Создать новый проект
   run         Запустить сервер с горячей перезагрузкой
   version     Показать версию
@@ -185,22 +185,18 @@ func handleGenerateMigration(args []string) {
 // ---------- 3. КОМАНДА make ----------
 
 func handleMakeModels() {
-    // 1. Определяем рабочую директорию - откуда мы запускаем команду.
-    dir, err := os.Getwd()
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "❌ Не могу определить текущую папку: %v\n", err)
-        os.Exit(1)
-    }
-    
-    fmt.Printf("🔍 BossQ сканирует модели в '%s'...\n", dir)
-    
-    // 2. Вызываем генератор, передавая ему ТЕКУЩУЮ ДИРЕКТОРИЮ.
-    if err := bossq.Generate(dir); err != nil {
-        fmt.Fprintf(os.Stderr, "❌ Ошибка генерации: %v\n", err)
-        os.Exit(1)
-    }
-    
-    fmt.Println("✅ BossQ сгенерировал Store-файлы!")
+    root, _ := os.Getwd()
+    fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
+    filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        if err != nil || !info.IsDir() { return nil }
+        // Пропускаем скрытые папки и папки с зависимостями
+        if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" { return filepath.SkipDir }
+        if err := bossq.Generate(path); err != nil {
+            fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
+        }
+        return nil
+    })
+    fmt.Println("✅ BossQ завершил сканирование!")
 }
 
 // ---------- 4. КОМАНДА new ----------
