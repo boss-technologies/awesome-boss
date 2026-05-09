@@ -284,4 +284,60 @@ func (s *{{.StoreName}}) Load{{.RelationName}}(ctx context.Context, m *{{.ModelN
 }
 `
 
+// ----------------- Full-Text Search templates -----------------
+
+const searchMethod = `
+// Search выполняет полнотекстовый поиск по полям с весами.
+func (s *{{.StoreName}}) Search(ctx context.Context, query string, limit int) ([]{{.ModelName}}, error) {
+	rows, err := s.pool.Query(ctx,
+		` + "`SELECT {{.AllColumns}} FROM {{.TableName}} WHERE search_vector @@ plainto_tsquery($1, $2) ORDER BY ts_rank(search_vector, plainto_tsquery($1, $2)) DESC LIMIT $3`" + `,
+		"{{.FTSLanguage}}", query, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fts search {{.TableName}}: %w", err)
+	}
+	defer rows.Close()
+	var items []{{.ModelName}}
+	for rows.Next() {
+		var m {{.ModelName}}
+		if err := rows.Scan({{.ScanAll}}); err != nil {
+			return nil, fmt.Errorf("scan {{.TableName}}: %w", err)
+		}
+		items = append(items, m)
+	}
+	return items, rows.Err()
+}
+`
+
+const searchWithHeadlineMethod = `
+// {{.ModelName}}SearchResult содержит результат поиска с подсвеченным фрагментом.
+type {{.ModelName}}SearchResult struct {
+	{{- range .Fields}}
+	{{.Name}} {{.Type}}
+	{{- end}}
+	Headline string
+}
+
+// SearchWithHeadline выполняет поиск и возвращает подсвеченный фрагмент.
+func (s *{{.StoreName}}) SearchWithHeadline(ctx context.Context, query string, limit int) ([]{{.ModelName}}SearchResult, error) {
+	rows, err := s.pool.Query(ctx,
+		` + "`SELECT {{.SelectWithHeadline}} FROM {{.TableName}} WHERE search_vector @@ plainto_tsquery($1, $2) ORDER BY ts_rank(search_vector, plainto_tsquery($1, $2)) DESC LIMIT $3`" + `,
+		"{{.FTSLanguage}}", query, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fts search with headline {{.TableName}}: %w", err)
+	}
+	defer rows.Close()
+	var items []{{.ModelName}}SearchResult
+	for rows.Next() {
+		var item {{.ModelName}}SearchResult
+		if err := rows.Scan({{.ScanHeadline}}); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+`
+
 // Выполнено с любовью для Босса 🐈‍

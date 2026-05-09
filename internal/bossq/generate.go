@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"golang.org/x/tools/go/packages"
 )
 
 // ModelInfo хранит разобранную информацию о модели.
@@ -24,6 +24,16 @@ type ModelInfo struct {
 	Relations  []RelationInfo
 	Imports    []string
 	SourceFile string // путь к исходному файлу, чтобы сгенерировать рядом
+	// FTS
+	FTSLanguage string        // язык полнотекстового поиска, например "ru_hunspell"
+	FTSFields   []FTSFieldInfo // поля, участвующие в FTS с весами
+}
+
+// FTSFieldInfo описывает одно поле для полнотекстового поиска.
+type FTSFieldInfo struct {
+	FieldName  string
+	ColumnName string
+	Weight     string // A, B, C, D
 }
 
 // RelationInfo описывает одну связь модели.
@@ -47,37 +57,48 @@ type FieldInfo struct {
 	HasDefault bool
 	DefaultVal string
 	Tag        string
+	FTSWeight  string // вес, если поле участвует в FTS
 }
 
 // Generate читает все Go-файлы в директории, находит модели с тегом bossq
 // и генерирует для каждой файл {name}_bossq.go.
 func Generate(dir string) error {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  dir,
+	}
+	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
-		return fmt.Errorf("parse dir %s: %w", dir, err)
+		return fmt.Errorf("packages.Load: %w", err)
+	}
+	if packages.PrintErrors(pkgs) > 0 {
+		return fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
 	}
 
-	// Сначала собираем все модели из всех файлов.
 	var allModels []ModelInfo
 	for _, pkg := range pkgs {
-		for fileName, file := range pkg.Files {
+		for i, file := range pkg.Syntax {
 			models := extractModels(file)
-			for i := range models {
-				models[i].Package = pkg.Name
-				models[i].SourceFile = fileName // сохраняем путь к исходному файлу
+			for j := range models {
+				models[j].Package = pkg.Name
+				// Используем реальный путь из pkg.GoFiles
+				models[j].SourceFile = pkg.GoFiles[i]
 			}
 			allModels = append(allModels, models...)
 		}
 	}
 
-	// Строим карту по имени модели.
+	if len(allModels) == 0 {
+		// Не ошибка: просто в этой папке нет моделей.
+		return nil
+	}
+
+	// Карта моделей для связей.
 	modelMap := make(map[string]ModelInfo, len(allModels))
 	for _, m := range allModels {
 		modelMap[m.ModelName] = m
 	}
 
-	// Генерируем store-файлы, передавая карту моделей.
 	for _, model := range allModels {
 		if err := writeStoreFile(model.SourceFile, model, modelMap); err != nil {
 			return fmt.Errorf("write store for %s: %w", model.ModelName, err)
@@ -102,6 +123,7 @@ func extractModels(file *ast.File) []ModelInfo {
 		}
 
 		tableName := ""
+		ftsLanguage := ""
 		// Сначала смотрим в Doc (комментарий перед объявлением)
 		var commentGroup *ast.CommentGroup
 		if typeSpec.Doc != nil {
@@ -112,9 +134,14 @@ func extractModels(file *ast.File) []ModelInfo {
 		if commentGroup != nil {
 			for _, comment := range commentGroup.List {
 				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+				// Ищем table=
 				if after, ok0 := strings.CutPrefix(text, "bossq:table="); ok0 {
 					tableName = after
-					break
+					// Также может содержать fts= после table, если в одной строке, но проще искать отдельно
+				}
+				// Ищем fts=
+				if after, ok1 := strings.CutPrefix(text, "bossq:fts="); ok1 {
+					ftsLanguage = after
 				}
 			}
 		}
@@ -123,9 +150,10 @@ func extractModels(file *ast.File) []ModelInfo {
 		}
 
 		model := ModelInfo{
-			ModelName: typeSpec.Name.Name,
-			StoreName: typeSpec.Name.Name + "Store",
-			TableName: tableName,
+			ModelName:   typeSpec.Name.Name,
+			StoreName:   typeSpec.Name.Name + "Store",
+			TableName:   tableName,
+			FTSLanguage: ftsLanguage,
 		}
 
 		for _, field := range structType.Fields.List {
@@ -161,7 +189,18 @@ func extractModels(file *ast.File) []ModelInfo {
 				model.PKField = fInfo.Name
 				model.PKColumn = fInfo.ColumnName
 			}
+
+			// Добавляем поле в модель
 			model.Fields = append(model.Fields, fInfo)
+
+			// Если поле имеет вес FTS, добавляем в список FTSFields
+			if fInfo.FTSWeight != "" {
+				model.FTSFields = append(model.FTSFields, FTSFieldInfo{
+					FieldName:  fInfo.Name,
+					ColumnName: fInfo.ColumnName,
+					Weight:     fInfo.FTSWeight,
+				})
+			}
 		}
 
 		models = append(models, model)
@@ -207,6 +246,16 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 		return err
 	}
 	methods = append(methods, relMethods...)
+
+	// Добавляем FTS методы, если задан язык и есть поля
+	if model.FTSLanguage != "" && len(model.FTSFields) > 0 {
+		if search, err := genSearchMethod(model); err == nil {
+			methods = append(methods, search)
+		}
+		if headline, err := genSearchWithHeadlineMethod(model); err == nil {
+			methods = append(methods, headline)
+		}
+	}
 
 	data := struct {
 		Package   string
@@ -448,6 +497,8 @@ func (f *FieldInfo) parseTag(tag string) {
 			f.DefaultVal = strings.TrimPrefix(part, "default=")
 		case strings.HasPrefix(part, "column="):
 			f.ColumnName = strings.TrimPrefix(part, "column=")
+		case strings.HasPrefix(part, "fts="):
+			f.FTSWeight = strings.TrimPrefix(part, "fts=")
 		}
 	}
 }
@@ -628,6 +679,77 @@ func genBelongsToMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (s
 		"TargetModel":  rel.Model,
 	}
 	tmpl, err := template.New("belongsTo").Parse(loadBelongsToTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// ----------------- FTS генераторы -----------------
+
+func genSearchMethod(m ModelInfo) (string, error) {
+	var allCols, scanAll []string
+	for _, f := range m.Fields {
+		allCols = append(allCols, f.ColumnName)
+		scanAll = append(scanAll, "&m."+f.Name)
+	}
+	data := map[string]string{
+		"StoreName":   m.StoreName,
+		"ModelName":   m.ModelName,
+		"TableName":   m.TableName,
+		"FTSLanguage": m.FTSLanguage,
+		"AllColumns":  strings.Join(allCols, ", "),
+		"ScanAll":     strings.Join(scanAll, ", "),
+	}
+	tmpl, _ := template.New("search").Parse(searchMethod)
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
+	var selectParts, scanParts []string
+	// Для структуры SearchResult нам нужны поля снова
+	type fieldStruct struct{ Name, Type string }
+	var fieldsForStruct []fieldStruct
+
+	for _, f := range m.Fields {
+		selectParts = append(selectParts, f.ColumnName)
+		scanParts = append(scanParts, "&item."+f.Name)
+		fieldsForStruct = append(fieldsForStruct, fieldStruct{f.Name, f.Type})
+	}
+
+	// Используем первое FTS поле в ts_headline (можно улучшить)
+	headlineField := m.FTSFields[0].ColumnName
+	selectWithHeadline := strings.Join(selectParts, ", ") +
+		fmt.Sprintf(`, ts_headline('%s', %s, plainto_tsquery('%s', $2), 'MaxWords=30, MinWords=15') AS headline`,
+			m.FTSLanguage, headlineField, m.FTSLanguage)
+	scanHeadline := strings.Join(scanParts, ", ") + ", &item.Headline"
+
+	data := struct {
+		StoreName          string
+		ModelName          string
+		TableName          string
+		FTSLanguage        string
+		SelectWithHeadline string
+		ScanHeadline       string
+		Fields             []fieldStruct
+	}{
+		StoreName:          m.StoreName,
+		ModelName:          m.ModelName,
+		TableName:          m.TableName,
+		FTSLanguage:        m.FTSLanguage,
+		SelectWithHeadline: selectWithHeadline,
+		ScanHeadline:       scanHeadline,
+		Fields:             fieldsForStruct,
+	}
+	tmpl, err := template.New("searchHeadline").Parse(searchWithHeadlineMethod)
 	if err != nil {
 		return "", err
 	}

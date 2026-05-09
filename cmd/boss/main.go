@@ -15,7 +15,7 @@ import (
 )
 
 // ---------- ВЕРСИЯ ----------
-const version = "0.5.0"
+const version = "0.6.0"
 
 // ---------- ОСНОВНАЯ ФУНКЦИЯ (диспетчер команд) ----------
 func main() {
@@ -48,7 +48,7 @@ func main() {
 
 // ---------- ВЫВОД СПРАВКИ ----------
 func printUsage() {
-	fmt.Println(`🐱 Awesome Boss CLI v0.5.0
+	fmt.Println(`🐱 Awesome Boss CLI v0.6.0
 
 Использование:
   boss <команда> [аргументы]
@@ -189,10 +189,12 @@ func handleMakeModels() {
     fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
     filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
         if err != nil || !info.IsDir() { return nil }
-        // Пропускаем скрытые папки и папки с зависимостями
         if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" { return filepath.SkipDir }
+        fmt.Printf("   проверяю %s...", path)
         if err := bossq.Generate(path); err != nil {
             fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
+        } else {
+            fmt.Println(" OK")
         }
         return nil
     })
