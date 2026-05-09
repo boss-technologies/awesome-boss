@@ -812,4 +812,32 @@ func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
+// ExtractModelsFromDir сканирует все Go-файлы в директории и возвращает найденные модели.
+func ExtractModelsFromDir(dir string) ([]ModelInfo, error) {
+    cfg := &packages.Config{
+        Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
+        Dir:  dir,
+    }
+    pkgs, err := packages.Load(cfg, ".")
+    if err != nil {
+        return nil, fmt.Errorf("packages.Load: %w", err)
+    }
+    if packages.PrintErrors(pkgs) > 0 {
+        return nil, fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
+    }
+
+    var allModels []ModelInfo
+    for _, pkg := range pkgs {
+        for i, file := range pkg.Syntax {
+            models := extractModels(file)
+            for j := range models {
+                models[j].Package = pkg.Name
+                models[j].SourceFile = pkg.GoFiles[i]
+            }
+            allModels = append(allModels, models...)
+        }
+    }
+    return allModels, nil
+}
+
 // Выполнено с любовью для Босса 🐈

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/boss-technologies/awesome-boss/auth"
 	"github.com/boss-technologies/awesome-boss/internal/bossq"
+	bq "github.com/boss-technologies/awesome-boss/bossq"
 )
 
 // ---------- ВЕРСИЯ ----------
@@ -112,7 +114,7 @@ func handleGenerate(args []string) {
 	case "key":
 		handleGenerateKey(args[1:])
 	case "migration":
-		handleGenerateMigration(args[1:])
+		handleMakeMigrations()
 	default:
 		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
 		os.Exit(1)
@@ -139,47 +141,56 @@ func handleGenerateKey(args []string) {
 	}
 }
 
-func handleGenerateMigration(args []string) {
-	if len(args) == 0 {
-		fmt.Println("❌ Укажите название миграции: boss generate migration <имя>")
-		os.Exit(1)
-	}
-	migrationName := args[0]
+func handleMakeMigrations() {
+    root, _ := os.Getwd()
+    fmt.Printf("🔍 BossQ сканирует модели в '%s'...\n", root)
 
-	// Папка для миграций
-	migrationsDir := "migrations"
+    var allModels []bossq.ModelInfo
+    filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        if err != nil || !info.IsDir() || strings.HasPrefix(info.Name(), ".") {
+            return nil
+        }
+        models, err := bq.LoadModels(path) // нужно, чтобы LoadModels была публичной
+        if err != nil {
+            // игнорируем пути без Go-файлов
+            return nil
+        }
+        allModels = append(allModels, models...)
+        return nil
+    })
 
-	// Создаём папку, если её ещё нет
-	if err := os.MkdirAll(migrationsDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Не удалось создать директорию миграций: %v\n", err)
-		os.Exit(1)
-	}
+    if len(allModels) == 0 {
+        fmt.Println("❌ Не найдено моделей с тегом bossq")
+        return
+    }
 
-	// Определяем следующий номер версии
-	nextVersion := getNextMigrationVersion(migrationsDir)
+    // 2. Подключаемся к БД
+    connString := os.Getenv("DATABASE_URL")
+    if connString == "" {
+        connString = "postgres://localhost:5432/mydb?sslmode=disable"
+    }
+    pool, err := bq.NewPool(context.Background(), connString) 
+    if err != nil {
+        fmt.Printf("❌ Ошибка подключения к БД: %v\n", err)
+        return
+    }
+    defer pool.Close()
 
-	// Формируем имена файлов
-	versionStr := fmt.Sprintf("%06d", nextVersion)
-	upFile := filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.up.sql", versionStr, migrationName))
-	downFile := filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.down.sql", versionStr, migrationName))
-
-	// Шаблоны содержимого
-	upContent := fmt.Sprintf("-- Миграция %s: %s (UP)\n", versionStr, migrationName)
-	downContent := fmt.Sprintf("-- Миграция %s: %s (DOWN)\n", versionStr, migrationName)
-
-	// Записываем файлы
-	if err := os.WriteFile(upFile, []byte(upContent), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка создания файла %s: %v\n", upFile, err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(downFile, []byte(downContent), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка создания файла %s: %v\n", downFile, err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("✅ Созданы миграции:\n")
-	fmt.Printf("   📄 %s\n", upFile)
-	fmt.Printf("   📄 %s\n", downFile)
+    // 3. Для каждой модели генерируем миграции
+    for _, model := range allModels {
+        dbColumns, err := bq.GetTableColumns(context.Background(), pool, model.TableName)
+        if err != nil {
+            // Таблица не существует — создаём её
+            createSQL := bq.GenerateCreateTable(model)
+            bq.WriteMigration(model.TableName, "create", createSQL, "DROP TABLE IF EXISTS "+model.TableName+";")
+            continue
+        }
+        upSQL, downSQL := bq.DiffModelWithDatabase(model, dbColumns)
+        if upSQL != "" {
+            bq.WriteMigration(model.TableName, "auto", upSQL, downSQL)
+        }
+    }
+    fmt.Println("✅ Миграции сгенерированы в папке migrations/")
 }
 
 // ---------- 3. КОМАНДА make ----------

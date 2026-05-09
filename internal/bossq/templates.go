@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"github.com/boss-technologies/awesome-boss/core"
 )
 
 // {{.StoreName}} — потокобезопасный store для работы с таблицей {{.TableName}}.
