@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ type ModelInfo struct {
 	Imports    []string
 	SourceFile string // путь к исходному файлу, чтобы сгенерировать рядом
 	// FTS
-	FTSLanguage string        // язык полнотекстового поиска, например "ru_hunspell"
+	FTSLanguage string         // язык полнотекстового поиска, например "ru_hunspell"
 	FTSFields   []FTSFieldInfo // поля, участвующие в FTS с весами
 }
 
@@ -111,101 +112,129 @@ func Generate(dir string) error {
 func extractModels(file *ast.File) []ModelInfo {
 	var models []ModelInfo
 
-	ast.Inspect(file, func(n ast.Node) bool {
-		typeSpec, ok := n.(*ast.TypeSpec)
-		if !ok {
-			return true
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.TYPE {
+			continue
 		}
 
-		structType, ok := typeSpec.Type.(*ast.StructType)
-		if !ok {
-			return true
-		}
-
+		// Комментарий может быть у самого GenDecl (группа типов) или у отдельной спецификации.
+		// Сначала смотрим в GenDecl.Doc (или GenDecl.Comment для висячего комментария).
 		tableName := ""
 		ftsLanguage := ""
-		// Сначала смотрим в Doc (комментарий перед объявлением)
-		var commentGroup *ast.CommentGroup
-		if typeSpec.Doc != nil {
-			commentGroup = typeSpec.Doc
-		} else if typeSpec.Comment != nil {
-			commentGroup = typeSpec.Comment
-		}
-		if commentGroup != nil {
-			for _, comment := range commentGroup.List {
+		if genDecl.Doc != nil {
+			for _, comment := range genDecl.Doc.List {
 				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
-				// Ищем table=
-				if after, ok0 := strings.CutPrefix(text, "bossq:table="); ok0 {
+				if after, found := strings.CutPrefix(text, "bossq:table="); found {
 					tableName = after
-					// Также может содержать fts= после table, если в одной строке, но проще искать отдельно
 				}
-				// Ищем fts=
-				if after, ok1 := strings.CutPrefix(text, "bossq:fts="); ok1 {
+				if after, found := strings.CutPrefix(text, "bossq:fts="); found {
 					ftsLanguage = after
 				}
 			}
 		}
+		// Никакой проверки genDecl.Comment! Её здесь быть не должно.
+
 		if tableName == "" {
-			return true
+			continue // это не наша модель, пропускаем группу
 		}
 
-		model := ModelInfo{
-			ModelName:   typeSpec.Name.Name,
-			StoreName:   typeSpec.Name.Name + "Store",
-			TableName:   tableName,
-			FTSLanguage: ftsLanguage,
-		}
-
-		for _, field := range structType.Fields.List {
-			if len(field.Names) == 0 {
+		// Теперь обходим все спецификации типов внутри этой группы
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok {
 				continue
 			}
-			fInfo := FieldInfo{
-				Name: field.Names[0].Name,
-				Type: typeToString(field.Type),
-			}
 
-			// Обрабатываем тег
-			if field.Tag != nil {
-				tag := strings.Trim(field.Tag.Value, "`")
-				// Сначала проверяем, не является ли поле связью
-				relTag := extractRelationTag(tag)
-				if relTag.Type != "" {
-					relTag.Name = field.Names[0].Name
-					model.Relations = append(model.Relations, relTag)
-					continue // связь не попадает в список полей для SQL
+			// Если у конкретного типа есть свой Doc, он переопределяет групповой?
+			// Для простоты, если у спецификации есть свой комментарий с table=, используем его.
+			localTable := tableName
+			localFTS := ftsLanguage
+			if typeSpec.Doc != nil {
+				for _, comment := range typeSpec.Doc.List {
+					text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+					if after, found := strings.CutPrefix(text, "bossq:table="); found {
+						localTable = after
+					}
+					if after, found := strings.CutPrefix(text, "bossq:fts="); found {
+						localFTS = after
+					}
 				}
-				// Обычное поле: парсим тег
-				fInfo.Tag = tag
-				fInfo.parseTag(tag)
+			} else if typeSpec.Comment != nil {
+				for _, comment := range typeSpec.Comment.List {
+					text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+					if after, found := strings.CutPrefix(text, "bossq:table="); found {
+						localTable = after
+					}
+					if after, found := strings.CutPrefix(text, "bossq:fts="); found {
+						localFTS = after
+					}
+				}
 			}
 
-			// Имя колонки по умолчанию = snake_case имени поля
-			if fInfo.ColumnName == "" {
-				fInfo.ColumnName = toSnakeCase(fInfo.Name)
+			structType, ok := typeSpec.Type.(*ast.StructType)
+			if !ok {
+				continue
 			}
 
-			if fInfo.IsPK {
-				model.PKField = fInfo.Name
-				model.PKColumn = fInfo.ColumnName
+			model := ModelInfo{
+				ModelName:   typeSpec.Name.Name,
+				StoreName:   typeSpec.Name.Name + "Store",
+				TableName:   localTable,
+				FTSLanguage: localFTS,
 			}
 
-			// Добавляем поле в модель
-			model.Fields = append(model.Fields, fInfo)
+			// Обход полей структуры
+			for _, field := range structType.Fields.List {
+				if len(field.Names) == 0 {
+					continue
+				}
+				fInfo := FieldInfo{
+					Name: field.Names[0].Name,
+					Type: typeToString(field.Type),
+				}
 
-			// Если поле имеет вес FTS, добавляем в список FTSFields
-			if fInfo.FTSWeight != "" {
-				model.FTSFields = append(model.FTSFields, FTSFieldInfo{
-					FieldName:  fInfo.Name,
-					ColumnName: fInfo.ColumnName,
-					Weight:     fInfo.FTSWeight,
-				})
+				// Обрабатываем тег
+				if field.Tag != nil {
+					tag := strings.Trim(field.Tag.Value, "`")
+					// Сначала проверяем, не является ли поле связью
+					relTag := extractRelationTag(tag)
+					if relTag.Type != "" {
+						relTag.Name = field.Names[0].Name
+						model.Relations = append(model.Relations, relTag)
+						continue // связь не попадает в список полей для SQL
+					}
+					// Обычное поле: парсим тег
+					fInfo.Tag = tag
+					fInfo.parseTag(tag)
+				}
+
+				// Имя колонки по умолчанию = snake_case имени поля
+				if fInfo.ColumnName == "" {
+					fInfo.ColumnName = toSnakeCase(fInfo.Name)
+				}
+
+				if fInfo.IsPK {
+					model.PKField = fInfo.Name
+					model.PKColumn = fInfo.ColumnName
+				}
+
+				// Добавляем поле в модель
+				model.Fields = append(model.Fields, fInfo)
+
+				// Если поле имеет вес FTS, добавляем в список FTSFields
+				if fInfo.FTSWeight != "" {
+					model.FTSFields = append(model.FTSFields, FTSFieldInfo{
+						FieldName:  fInfo.Name,
+						ColumnName: fInfo.ColumnName,
+						Weight:     fInfo.FTSWeight,
+					})
+				}
 			}
+
+			models = append(models, model)
 		}
-
-		models = append(models, model)
-		return true
-	})
+	}
 
 	return models
 }
@@ -240,6 +269,9 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 	}
 	if qbCode, err := genQueryBuilder(model); err == nil {
 		methods = append(methods, qbCode)
+	}
+	if listPaginated, err := genListPaginatedMethod(model); err == nil {
+    	methods = append(methods, listPaginated)
 	}
 	relMethods, err := genRelationMethods(model, allModels)
 	if err != nil {
@@ -341,6 +373,26 @@ func genGetByIDMethod(m ModelInfo) (string, error) {
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
 	return buf.String(), nil
+}
+
+func genListPaginatedMethod(m ModelInfo) (string, error) {
+    var allCols, scanAll []string
+    for _, f := range m.Fields {
+        allCols = append(allCols, f.ColumnName)
+        scanAll = append(scanAll, "&m."+f.Name)
+    }
+    data := map[string]string{
+        "StoreName":  m.StoreName,
+        "ModelName":  m.ModelName,
+        "TableName":  m.TableName,
+        "PKColumn":   m.PKColumn,
+        "AllColumns": strings.Join(allCols, ", "),
+        "ScanAll":    strings.Join(scanAll, ", "),
+    }
+    tmpl, _ := template.New("listPaginated").Parse(listPaginatedMethod)
+    var buf bytes.Buffer
+    tmpl.Execute(&buf, data)
+    return buf.String(), nil
 }
 
 func genUpdateMethod(m ModelInfo) (string, error) {

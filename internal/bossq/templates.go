@@ -340,4 +340,39 @@ func (s *{{.StoreName}}) SearchWithHeadline(ctx context.Context, query string, l
 }
 `
 
+const listPaginatedMethod = `
+// ListPaginated возвращает страницу записей с пагинацией.
+func (s *{{.StoreName}}) ListPaginated(ctx context.Context, p core.Paginator) (core.Page[{{.ModelName}}], error) {
+    p.Validate()
+    var total int
+    err := s.pool.QueryRow(ctx, ` + "`SELECT COUNT(*) FROM {{.TableName}}`" + `).Scan(&total)
+    if err != nil {
+        return core.Page[{{.ModelName}}]{}, fmt.Errorf("count {{.TableName}}: %w", err)
+    }
+
+    rows, err := s.pool.Query(ctx,
+        ` + "`SELECT {{.AllColumns}} FROM {{.TableName}} ORDER BY {{.PKColumn}} DESC LIMIT $1 OFFSET $2`" + `,
+        p.PageSize, p.Offset,
+    )
+    if err != nil {
+        return core.Page[{{.ModelName}}]{}, fmt.Errorf("list paginated {{.TableName}}: %w", err)
+    }
+    defer rows.Close()
+
+    var items []{{.ModelName}}
+    for rows.Next() {
+        var m {{.ModelName}}
+        if err := rows.Scan({{.ScanAll}}); err != nil {
+            return core.Page[{{.ModelName}}]{}, fmt.Errorf("scan {{.TableName}}: %w", err)
+        }
+        items = append(items, m)
+    }
+    if err := rows.Err(); err != nil {
+        return core.Page[{{.ModelName}}]{}, err
+    }
+
+    return core.NewPage(items, p, total), nil
+}
+`
+
 // Выполнено с любовью для Босса 🐈‍
