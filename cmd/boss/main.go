@@ -188,17 +188,40 @@ func handleMakeModels() {
     root, _ := os.Getwd()
     fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
     filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil || !info.IsDir() { return nil }
-        if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" { return filepath.SkipDir }
-        fmt.Printf("   проверяю %s...", path)
+        if err != nil || !info.IsDir() {
+            return nil
+        }
+        // Пропускаем скрытые папки и папки с зависимостями
+        if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" {
+            return filepath.SkipDir
+        }
+
+        // Проверяем, есть ли в этой папке хотя бы один .go-файл
+        if !hasGoFiles(path) {
+            // Если нет — просто идём дальше, без ошибки
+            return nil
+        }
+
         if err := bossq.Generate(path); err != nil {
             fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
-        } else {
-            fmt.Println(" OK")
         }
         return nil
     })
     fmt.Println("✅ BossQ завершил сканирование!")
+}
+
+// hasGoFiles возвращает true, если в директории есть хотя бы один файл с расширением .go
+func hasGoFiles(dir string) bool {
+    entries, err := os.ReadDir(dir)
+    if err != nil {
+        return false
+    }
+    for _, entry := range entries {
+        if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+            return true
+        }
+    }
+    return false
 }
 
 // ---------- 4. КОМАНДА new ----------

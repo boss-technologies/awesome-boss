@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"io/fs"
 
 	"github.com/boss-technologies/awesome-boss/config"
 	"github.com/boss-technologies/awesome-boss/core"
@@ -253,6 +254,22 @@ func (app *BossApp) Static(prefix, dir string) {
 	// Обрезаем слеш в конце prefix, если есть, и добавляем "/*"
 	path := prefix + "/{file:*}"
 	app.router.GET(path, handler)
+}
+
+// StaticFS регистрирует обработчик для раздачи файлов из embed.FS
+func (app *BossApp) StaticFS(prefix string, fsys fs.FS) {
+    // Создаем объект FS, передавая ему корневую папку и твой fs.FS
+    fs := &fasthttp.FS{
+        Root:               ".",  // Корень файловой системы
+        FS:                 fsys, // Твой embed.FS
+        GenerateIndexPages: false,
+        AcceptByteRange:    true,
+    }
+    // Получаем обработчик запросов из структуры FS
+    handler := fs.NewRequestHandler()
+
+    // Регистрируем маршрут
+    app.router.GET(prefix+"/{file:*}", handler)
 }
 
 // Run запускает сервер на указанном адресе с корректным graceful shutdown.
