@@ -1,7 +1,9 @@
 package config
 
 import (
-    "time"
+	"fmt"
+	"strings"
+	"time"
 )
 
 type Mode string
@@ -25,7 +27,6 @@ type ServerConfig struct {
     ReadTimeout   time.Duration `toml:"read_timeout"`
     WriteTimeout  time.Duration `toml:"write_timeout"`
     EnableGzip    bool          `toml:"enable_gzip"`
-    EnableHTTP2   bool          `toml:"enable_http2"`
 }
 
 type AuthConfig struct {
@@ -33,11 +34,7 @@ type AuthConfig struct {
 }
 
 type DatabaseConfig struct {
-    Host     string `toml:"host"`
-    Port     int    `toml:"port"`
-    User     string `toml:"user"`
-    Password string `toml:"password"`
-    Name     string `toml:"name"`
+    Url string `toml:"url_database"`
 }
 
 type LoggingConfig struct {
@@ -58,13 +55,22 @@ func Default() *BossConfig {
             SecretKey: "", // должен быть сгенерирован отдельно
         },
         Database: DatabaseConfig{
-            Host: "localhost",
-            Port: 5432,
+            Url: "postgres://postgres:root@localhost:5432/dbname?sslmode=disable",
         },
         Logging: LoggingConfig{
             Level: "info",
         },
     }
+}
+
+func (cfg *BossConfig) Validate() error {
+    if cfg.Mode == ModeFintech {
+        // Простая проверка: в fintech-режим нельзя входить с sslmode=disable
+        if strings.Contains(cfg.Database.Url, "sslmode=disable") {
+            return fmt.Errorf("FINANCIAL MODE: insecure database connection is forbidden, use sslmode=verify-full")
+        }
+    }
+    return nil
 }
 
 // Выполнено с любовью для Босса 🐈‍

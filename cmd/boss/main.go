@@ -2,18 +2,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/boss-technologies/awesome-boss/auth"
-	"github.com/boss-technologies/awesome-boss/internal/bossq"
 	bq "github.com/boss-technologies/awesome-boss/bossq"
+	"github.com/boss-technologies/awesome-boss/internal/bossq"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/joho/godotenv"
 )
 
 // ---------- ВЕРСИЯ ----------
@@ -142,97 +145,137 @@ func handleGenerateKey(args []string) {
 }
 
 func handleMakeMigrations() {
-    root, _ := os.Getwd()
+    _ = godotenv.Load()
+
+    root, err := os.Getwd()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Ошибка получения текущей директории: %v\n", err)
+        os.Exit(1)
+    }
     fmt.Printf("🔍 BossQ сканирует модели в '%s'...\n", root)
 
     var allModels []bossq.ModelInfo
-    filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil || !info.IsDir() || strings.HasPrefix(info.Name(), ".") {
+    err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+        if err != nil {
+            // Пропускаем пути, к которым нет доступа
+            fmt.Fprintf(os.Stderr, "⚠️ Ошибка доступа к %s: %v\n", path, err)
             return nil
         }
-        models, err := bq.LoadModels(path) // нужно, чтобы LoadModels была публичной
+        if info.IsDir() {
+            name := info.Name()
+            if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+                return filepath.SkipDir
+            }
+        }
+        models, err := bq.LoadModels(path)
         if err != nil {
-            // игнорируем пути без Go-файлов
+            // Игнорируем директории без Go-файлов, но логируем другие ошибки
+            if !strings.Contains(err.Error(), "no Go files") {
+                fmt.Fprintf(os.Stderr, "⚠️ Пропущена директория %s: %v\n", path, err)
+            }
             return nil
         }
         allModels = append(allModels, models...)
         return nil
     })
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Ошибка обхода директорий: %v\n", err)
+        os.Exit(1)
+    }
 
     if len(allModels) == 0 {
         fmt.Println("❌ Не найдено моделей с тегом bossq")
         return
     }
 
-    // 2. Подключаемся к БД
+    // 2. Подключаемся к БД с таймаутом
     connString := os.Getenv("DATABASE_URL")
     if connString == "" {
-        connString = "postgres://localhost:5432/mydb?sslmode=disable"
+        fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
+        os.Exit(1)
     }
-    pool, err := bq.NewPool(context.Background(), connString) 
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    pool, err := bq.NewPool(ctx, connString) // используем стандартную сигнатуру
     if err != nil {
-        fmt.Printf("❌ Ошибка подключения к БД: %v\n", err)
-        return
+        fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
+        os.Exit(1)
     }
     defer pool.Close()
 
     // 3. Для каждой модели генерируем миграции
     for _, model := range allModels {
-        dbColumns, err := bq.GetTableColumns(context.Background(), pool, model.TableName)
+        dbColumns, err := bq.GetTableColumns(ctx, pool, model.TableName)
         if err != nil {
-            // Таблица не существует — создаём её
-            createSQL := bq.GenerateCreateTable(model)
-            bq.WriteMigration(model.TableName, "create", createSQL, "DROP TABLE IF EXISTS "+model.TableName+";")
-            continue
+            // Проверяем, что ошибка связана именно с отсутствием таблицы
+            var pgErr *pgconn.PgError
+            if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+                // Таблицы нет — создаём
+                createSQL := bq.GenerateCreateTable(model)
+                if err := bq.WriteMigration(model.TableName, "create", createSQL,
+                    "DROP TABLE IF EXISTS "+model.TableName+";"); err != nil {
+                    fmt.Fprintf(os.Stderr, "❌ Ошибка записи миграции создания для %s: %v\n", model.TableName, err)
+                    os.Exit(1)
+                }
+                continue
+            }
+            // Любая другая ошибка — фатальная
+            fmt.Fprintf(os.Stderr, "❌ Ошибка получения структуры таблицы %s: %v\n", model.TableName, err)
+            os.Exit(1)
         }
+
         upSQL, downSQL := bq.DiffModelWithDatabase(model, dbColumns)
         if upSQL != "" {
-            bq.WriteMigration(model.TableName, "auto", upSQL, downSQL)
+            if err := bq.WriteMigration(model.TableName, "auto", upSQL, downSQL); err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Ошибка записи миграции auto для %s: %v\n", model.TableName, err)
+                os.Exit(1)
+            }
         }
     }
     fmt.Println("✅ Миграции сгенерированы в папке migrations/")
 }
-
 // ---------- 3. КОМАНДА make ----------
 
 func handleMakeModels() {
-    root, _ := os.Getwd()
-    fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
-    filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil || !info.IsDir() {
-            return nil
-        }
-        // Пропускаем скрытые папки и папки с зависимостями
-        if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" {
-            return filepath.SkipDir
-        }
+	root, _ := os.Getwd()
+	fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+		// Пропускаем скрытые папки и папки с зависимостями
+		if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" {
+			return filepath.SkipDir
+		}
 
-        // Проверяем, есть ли в этой папке хотя бы один .go-файл
-        if !hasGoFiles(path) {
-            // Если нет — просто идём дальше, без ошибки
-            return nil
-        }
+		// Проверяем, есть ли в этой папке хотя бы один .go-файл
+		if !hasGoFiles(path) {
+			// Если нет — просто идём дальше, без ошибки
+			return nil
+		}
 
-        if err := bossq.Generate(path); err != nil {
-            fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
-        }
-        return nil
-    })
-    fmt.Println("✅ BossQ завершил сканирование!")
+		if err := bossq.Generate(path); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
+		}
+		return nil
+	})
+	fmt.Println("✅ BossQ завершил сканирование!")
 }
 
 // hasGoFiles возвращает true, если в директории есть хотя бы один файл с расширением .go
 func hasGoFiles(dir string) bool {
-    entries, err := os.ReadDir(dir)
-    if err != nil {
-        return false
-    }
-    for _, entry := range entries {
-        if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
-            return true
-        }
-    }
-    return false
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 4. КОМАНДА new ----------
@@ -475,33 +518,31 @@ go.work.sum
 	}
 
 	// .env
-envContent := `# Секретный ключ для BAT (сгенерируйте командой 'boss generate key')
+	envContent := `# Секретный ключ для BAT (сгенерируйте командой 'boss generate key')
 BOSS_AUTH_SECRET=
+DATABASE_URL=
 `
-os.WriteFile(filepath.Join(projectPath, ".env"), []byte(envContent), 0644)
+	os.WriteFile(filepath.Join(projectPath, ".env"), []byte(envContent), 0644)
 
-// boss.toml
-tomlContent := `mode = "` + templateType + `"
+	// boss.toml
+	tomlContent := `mode = "` + templateType + `"
 
 [server]
 port = 8080
-read_timeout = "30s"
-write_timeout = "30s"
 enable_gzip = true
 
 [auth]
 # secret_key будет взят из переменной окружения BOSS_AUTH_SECRET
 
 [database]
-host = "localhost"
-port = 5432
+# тоже будет взят из переменной окружения DATABASE_URL
 
 [logging]
 level = "debug"
 `
-if err := os.WriteFile(filepath.Join(projectPath, "boss.toml"), []byte(tomlContent), 0644); err != nil {
-    return err
-}
+	if err := os.WriteFile(filepath.Join(projectPath, "boss.toml"), []byte(tomlContent), 0644); err != nil {
+		return err
+	}
 
 	// README.md
 	readmeContent := "# " + filepath.Base(projectPath) + `
@@ -531,8 +572,8 @@ if err := os.WriteFile(filepath.Join(projectPath, "boss.toml"), []byte(tomlConte
 
 // generateMain – копия из твоего new.go
 func generateMain(templateType, projectName string) string {
-    if templateType == "fintech" {
-        return `package main
+	if templateType == "fintech" {
+		return `package main
 
 import (
     "fmt"
@@ -540,7 +581,7 @@ import (
     "` + projectName + `/handlers"
     "github.com/boss-technologies/awesome-boss"
     "github.com/boss-technologies/awesome-boss/config"
-    "github.com/boss-technologies/awesome-boss/internal/fintech"
+    "github.com/boss-technologies/awesome-boss"
 )
 
 func main() {
@@ -551,18 +592,15 @@ func main() {
 
     app := awesomeboss.New(cfg) // режим fintech автоматом включит Audit
 
-    // Защищаем все маршруты авторизацией BAT-токеном
-    app.Use(fintech.RequireAuth(cfg.Auth.SecretKey))
-
     app.Get("/", handlers.ExampleHandler)
 
     addr := fmt.Sprintf(":%d", cfg.Server.Port)
     log.Fatal(app.Run(addr))
 }
 `
-    }
-    // normal
-    return `package main
+	}
+	// normal
+	return `package main
 
 import (
     "fmt"
@@ -585,35 +623,4 @@ func main() {
     log.Fatal(app.Run(addr))
 }
 `
-}
-
-// getNextMigrationVersion сканирует папку с миграциями и возвращает следующий номер.
-// Имена файлов должны быть в формате "число_*.*", подходящем для golang-migrate.
-func getNextMigrationVersion(dir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 1
-	}
-
-	maxVersion := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		// Ищем префикс до первого подчёркивания
-		underscoreIndex := strings.Index(name, "_")
-		if underscoreIndex <= 0 {
-			continue
-		}
-		versionStr := name[:underscoreIndex]
-		version, err := strconv.Atoi(versionStr)
-		if err != nil {
-			continue
-		}
-		if version > maxVersion {
-			maxVersion = version
-		}
-	}
-	return maxVersion + 1
 }

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"crypto/tls"
 	"sync"
 	"syscall"
 	"time"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
-	"github.com/dgrr/http2"
 )
 
 // BossApp представляет HTTP-приложение с поддержкой middleware и групп маршрутов
@@ -284,44 +282,12 @@ func (app *BossApp) Run(addr string) error {
 		srv.Handler = fasthttp.CompressHandler(srv.Handler)
 	}
 
-	if app.config.Server.EnableHTTP2 {
-		// Настройка TLS. Сертификаты можно сгенерировать для разработки.
-		cert, err := tls.LoadX509KeyPair("server.crt", "server.key")
-		if err != nil {
-			log.Fatalf("Ошибка загрузки TLS-сертификатов: %v", err)
+	go func() {
+		log.Printf("🚀 Awesome Boss запущен на %s", addr)
+		if err := srv.ListenAndServe(addr); err != nil {
+			log.Printf("Ошибка сервера: %v", err)
 		}
-
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"h2", "http/1.1"}, // Включаем поддержку HTTP/2
-		}
-
-		// Создаем TLS-обертку для нашего адреса
-		ln, err := tls.Listen("tcp", addr, tlsConfig)
-		if err != nil {
-			log.Fatalf("Ошибка запуска TLS-листенера: %v", err)
-		}
-		ln = tls.NewListener(ln, tlsConfig)
-
-		// Добавляем поддержку HTTP/2 к нашему fasthttp-серверу
-		http2.ConfigureServer(srv, http2.ServerConfig{})
-
-		// Запускаем сервер с TLS и HTTP/2
-		go func() {
-			log.Printf("🚀 Awesome Boss запущен на %s (TLS + HTTP/2)", addr)
-			if err := srv.Serve(ln); err != nil {
-				log.Printf("Ошибка сервера: %v", err)
-			}
-		}()
-	} else {
-		// Обычный запуск без TLS и HTTP/2
-		go func() {
-			log.Printf("🚀 Awesome Boss запущен на %s", addr)
-			if err := srv.ListenAndServe(addr); err != nil {
-				log.Printf("Ошибка сервера: %v", err)
-			}
-		}()
-	}
+	}()
 
 	// Ожидаем сигнал завершения
 	quit := make(chan os.Signal, 1)

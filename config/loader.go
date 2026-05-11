@@ -37,6 +37,9 @@ func applyEnvOverrides(cfg *BossConfig) {
     if key := os.Getenv("BOSS_AUTH_SECRET"); key != "" {
         cfg.Auth.SecretKey = key
     }
+    if url := os.Getenv("DATABASE_URL"); url != "" {
+        cfg.Database.Url = url
+    }
 }
 
 // Выполнено с любовью для Босса 🐈‍

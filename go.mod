@@ -27,14 +27,12 @@ require (
 )
 
 require (
-	github.com/dgrr/http2 v0.3.6
 	github.com/jackc/pgx/v5 v5.9.2
 	golang.org/x/tools v0.39.0
 )
 
 require (
 	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa // indirect
-	github.com/valyala/fastrand v1.1.0 // indirect
 	golang.org/x/mod v0.30.0 // indirect
 )
 

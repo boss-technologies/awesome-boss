@@ -271,7 +271,7 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 		methods = append(methods, qbCode)
 	}
 	if listPaginated, err := genListPaginatedMethod(model); err == nil {
-    	methods = append(methods, listPaginated)
+		methods = append(methods, listPaginated)
 	}
 	relMethods, err := genRelationMethods(model, allModels)
 	if err != nil {
@@ -376,23 +376,23 @@ func genGetByIDMethod(m ModelInfo) (string, error) {
 }
 
 func genListPaginatedMethod(m ModelInfo) (string, error) {
-    var allCols, scanAll []string
-    for _, f := range m.Fields {
-        allCols = append(allCols, f.ColumnName)
-        scanAll = append(scanAll, "&m."+f.Name)
-    }
-    data := map[string]string{
-        "StoreName":  m.StoreName,
-        "ModelName":  m.ModelName,
-        "TableName":  m.TableName,
-        "PKColumn":   m.PKColumn,
-        "AllColumns": strings.Join(allCols, ", "),
-        "ScanAll":    strings.Join(scanAll, ", "),
-    }
-    tmpl, _ := template.New("listPaginated").Parse(listPaginatedMethod)
-    var buf bytes.Buffer
-    tmpl.Execute(&buf, data)
-    return buf.String(), nil
+	var allCols, scanAll []string
+	for _, f := range m.Fields {
+		allCols = append(allCols, f.ColumnName)
+		scanAll = append(scanAll, "&m."+f.Name)
+	}
+	data := map[string]string{
+		"StoreName":  m.StoreName,
+		"ModelName":  m.ModelName,
+		"TableName":  m.TableName,
+		"PKColumn":   m.PKColumn,
+		"AllColumns": strings.Join(allCols, ", "),
+		"ScanAll":    strings.Join(scanAll, ", "),
+	}
+	tmpl, _ := template.New("listPaginated").Parse(listPaginatedMethod)
+	var buf bytes.Buffer
+	tmpl.Execute(&buf, data)
+	return buf.String(), nil
 }
 
 func genUpdateMethod(m ModelInfo) (string, error) {
@@ -634,16 +634,16 @@ func extractRelationTag(tag string) RelationInfo {
 		// Проверяем наличие скобок
 		modelName := rest
 		fkField := ""
-		if idx := strings.Index(rest, "("); idx != -1 {
-			modelName = rest[:idx]
+		if before, after, ok := strings.Cut(rest, "("); ok {
+			modelName = before
 			// Извлекаем fk=... из скобок
-			after := rest[idx+1:]
-			if endIdx := strings.Index(after, ")"); endIdx != -1 {
-				opts := after[:endIdx]
-				for _, opt := range strings.Split(opts, ",") {
+			after := after
+			if before, _, ok := strings.Cut(after, ")"); ok {
+				opts := before
+				for opt := range strings.SplitSeq(opts, ",") {
 					opt = strings.TrimSpace(opt)
-					if strings.HasPrefix(opt, "fk=") {
-						fkField = strings.TrimPrefix(opt, "fk=")
+					if after0, ok := strings.CutPrefix(opt, "fk="); ok {
+						fkField = after0
 					}
 				}
 			}
@@ -814,30 +814,30 @@ func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
 
 // ExtractModelsFromDir сканирует все Go-файлы в директории и возвращает найденные модели.
 func ExtractModelsFromDir(dir string) ([]ModelInfo, error) {
-    cfg := &packages.Config{
-        Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
-        Dir:  dir,
-    }
-    pkgs, err := packages.Load(cfg, ".")
-    if err != nil {
-        return nil, fmt.Errorf("packages.Load: %w", err)
-    }
-    if packages.PrintErrors(pkgs) > 0 {
-        return nil, fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
-    }
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  dir,
+	}
+	pkgs, err := packages.Load(cfg, ".")
+	if err != nil {
+		return nil, fmt.Errorf("packages.Load: %w", err)
+	}
+	if packages.PrintErrors(pkgs) > 0 {
+		return nil, fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
+	}
 
-    var allModels []ModelInfo
-    for _, pkg := range pkgs {
-        for i, file := range pkg.Syntax {
-            models := extractModels(file)
-            for j := range models {
-                models[j].Package = pkg.Name
-                models[j].SourceFile = pkg.GoFiles[i]
-            }
-            allModels = append(allModels, models...)
-        }
-    }
-    return allModels, nil
+	var allModels []ModelInfo
+	for _, pkg := range pkgs {
+		for i, file := range pkg.Syntax {
+			models := extractModels(file)
+			for j := range models {
+				models[j].Package = pkg.Name
+				models[j].SourceFile = pkg.GoFiles[i]
+			}
+			allModels = append(allModels, models...)
+		}
+	}
+	return allModels, nil
 }
 
 // Выполнено с любовью для Босса 🐈

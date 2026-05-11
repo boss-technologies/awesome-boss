@@ -53,4 +53,24 @@ func (f *Fur) Render(ctx *core.BossContext, templateName string, data any) error
 	return nil
 }
 
+// RenderPartial рендерит только указанный шаблон БЕЗ основного макета.
+// Идеально для HTMX-запросов.
+func (f *Fur) RenderPartial(ctx *core.BossContext, templateName string, data any) error {
+    buf := bufPool.Get().(*bytes.Buffer)
+    buf.Reset()
+    defer bufPool.Put(buf)
+
+    // Выполняем только указанный шаблон, а не весь набор с макетом
+    if err := f.templates.ExecuteTemplate(buf, templateName, data); err != nil {
+        log.Printf("Ошибка рендеринга partial %s: %v", templateName, err)
+        ctx.Response.SetStatusCode(fasthttp.StatusInternalServerError)
+        ctx.Response.SetBodyString("Internal Server Error")
+        return err
+    }
+
+    ctx.Response.Header.SetContentType("text/html; charset=utf-8")
+    ctx.Response.SetBody(buf.Bytes())
+    return nil
+}
+
 // Выполнено с любовью для Босса 🐈
