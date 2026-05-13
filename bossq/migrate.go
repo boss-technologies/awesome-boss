@@ -7,13 +7,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	internal "github.com/boss-technologies/awesome-boss/internal/bossq"
 
 	"github.com/golang-migrate/migrate/v4"
-	pgxv5 "github.com/golang-migrate/migrate/v4/database/pgx/v5" // алиас pgxv5
+	pgxv5 "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -52,58 +53,60 @@ func RunMigrations(connString, migrationsDir string) error {
 	log.Println("✅ Миграции успешно применены")
 	return nil
 }
+
 // ColumnInfo представляет колонку таблицы в базе данных
 type ColumnInfo struct {
 	Name          string
 	DataType      string
+	UDTName       string
 	IsNullable    bool
 	ColumnDefault *string
 }
 
-// goTypeToPostgres преобразует имя типа Go в тип PostgreSQL
+// goTypeToPostgres преобразует имя типа Go в тип PostgreSQL (UDT name)
 func goTypeToPostgres(goType string) string {
 	switch goType {
 	case "int", "int32":
-		return "INTEGER"
+		return "int4"
 	case "int64":
-		return "BIGINT"
+		return "int8"
 	case "uint", "uint32":
-		return "INTEGER"
+		return "int4"
 	case "uint64":
-		return "BIGINT"
+		return "int8"
 	case "string":
-		return "TEXT"
+		return "text"
 	case "bool":
-		return "BOOLEAN"
+		return "bool"
 	case "float32":
-		return "REAL"
+		return "float4"
 	case "float64":
-		return "DOUBLE PRECISION"
+		return "float8"
 	case "time.Time":
-		return "TIMESTAMPTZ"
+		return "timestamptz"
 	case "decimal.Decimal":
-		return "NUMERIC"
+		return "numeric"
 	case "[]byte":
-		return "BYTEA"
+		return "bytea"
 	case "json.RawMessage":
-		return "JSONB"
+		return "jsonb"
 	default:
-		return "TEXT" // fallback
+		return "text"
 	}
 }
 
 // LoadModels загружает все модели из указанной директории и возвращает срез ModelInfo
 func LoadModels(dir string) ([]internal.ModelInfo, error) {
-	// Используем экспортированную функцию из internal/bossq
 	return internal.ExtractModelsFromDir(dir)
 }
 
-// GetTableColumns возвращает список колонок таблицы из information_schema
+// GetTableColumns возвращает список колонок таблицы из information_schema.
+// Использует LOWER(table_name) для регистронезависимого сравнения.
 func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]ColumnInfo, error) {
 	query := `
-		SELECT column_name, data_type, is_nullable, column_default
+		SELECT column_name, data_type, udt_name, is_nullable, column_default
 		FROM information_schema.columns
-		WHERE table_name = $1
+		WHERE LOWER(table_name) = LOWER($1)
 		ORDER BY ordinal_position
 	`
 	rows, err := pool.Query(ctx, query, tableName)
@@ -116,7 +119,7 @@ func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) 
 	for rows.Next() {
 		var col ColumnInfo
 		var nullable string
-		err := rows.Scan(&col.Name, &col.DataType, &nullable, &col.ColumnDefault)
+		err := rows.Scan(&col.Name, &col.DataType, &col.UDTName, &nullable, &col.ColumnDefault)
 		if err != nil {
 			return nil, fmt.Errorf("scan column info: %w", err)
 		}
@@ -126,7 +129,8 @@ func GetTableColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) 
 	return columns, rows.Err()
 }
 
-// GenerateCreateTable создаёт SQL для CREATE TABLE на основе модели
+// GenerateCreateTable создаёт SQL для CREATE TABLE на основе модели.
+// Безопасность DEFAULT гарантируется вызовом validateDefault.
 func GenerateCreateTable(model internal.ModelInfo) string {
 	var cols []string
 	for _, f := range model.Fields {
@@ -141,15 +145,17 @@ func GenerateCreateTable(model internal.ModelInfo) string {
 		if f.IsNotNull {
 			colDef += " NOT NULL"
 		}
-		if f.HasDefault {
+		if f.HasDefault && validateDefault(f.DefaultVal) {
 			colDef += fmt.Sprintf(" DEFAULT %s", f.DefaultVal)
+		} else if f.HasDefault {
+			log.Printf("⚠️ Небезопасное значение DEFAULT для %s.%s пропущено", model.TableName, f.ColumnName)
 		}
 		cols = append(cols, "    "+colDef)
 	}
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n%s\n);", model.TableName, strings.Join(cols, ",\n"))
 }
 
-// DiffModelWithDatabase сравнивает модель с реальной таблицей и возвращает SQL для UP и DOWN миграций
+// DiffModelWithDatabase сравнивает модель с реальной таблицей и возвращает SQL для UP и DOWN миграций.
 func DiffModelWithDatabase(model internal.ModelInfo, dbColumns []ColumnInfo) (upSQL, downSQL string) {
 	dbColMap := make(map[string]ColumnInfo)
 	for _, col := range dbColumns {
@@ -161,28 +167,37 @@ func DiffModelWithDatabase(model internal.ModelInfo, dbColumns []ColumnInfo) (up
 	for _, field := range model.Fields {
 		expectedType := goTypeToPostgres(field.Type)
 		if field.IsAutoinc {
-			expectedType = "BIGSERIAL"
+			expectedType = "int8" // автоинкремент базируется на bigint
 		}
 		dbCol, exists := dbColMap[field.ColumnName]
 
 		if !exists {
 			// Новое поле
 			colDef := fmt.Sprintf("%s %s", field.ColumnName, expectedType)
+			if field.IsAutoinc {
+				colDef = fmt.Sprintf("%s BIGSERIAL", field.ColumnName)
+			}
 			if field.IsNotNull {
 				colDef += " NOT NULL"
 			}
-			if field.HasDefault {
+			if field.HasDefault && validateDefault(field.DefaultVal) {
 				colDef += fmt.Sprintf(" DEFAULT %s", field.DefaultVal)
 			}
 			up = append(up, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", model.TableName, colDef))
 			down = append(down, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", model.TableName, field.ColumnName))
 		} else {
-			// Тип изменился?
-			if dbCol.DataType != expectedType {
-				up = append(up, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", model.TableName, field.ColumnName, expectedType))
-				down = append(down, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", model.TableName, field.ColumnName, dbCol.DataType))
+			// Проверка изменения типа
+			if !strings.EqualFold(dbCol.UDTName, expectedType) {
+				newType := expectedType
+				if field.IsAutoinc {
+					newType = "BIGSERIAL"
+				}
+				// Критическое исправление: добавляем USING с приведением
+				up = append(up, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;",
+					model.TableName, field.ColumnName, newType, field.ColumnName, newType))
+				down = append(down, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;",
+					model.TableName, field.ColumnName, dbCol.UDTName, field.ColumnName, dbCol.UDTName))
 			}
-			// Удаляем обработанную колонку из карты
 			delete(dbColMap, field.ColumnName)
 		}
 	}
@@ -190,7 +205,7 @@ func DiffModelWithDatabase(model internal.ModelInfo, dbColumns []ColumnInfo) (up
 	// Оставшиеся колонки из БД — это удалённые поля
 	for colName, col := range dbColMap {
 		up = append(up, fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", model.TableName, colName))
-		down = append(down, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", model.TableName, colName, col.DataType))
+		down = append(down, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", model.TableName, colName, col.UDTName))
 	}
 
 	upSQL = strings.Join(up, "\n")
@@ -198,13 +213,12 @@ func DiffModelWithDatabase(model internal.ModelInfo, dbColumns []ColumnInfo) (up
 	return
 }
 
-// WriteMigration записывает UP и DOWN SQL в файлы миграций с автоинкрементным номером
+// WriteMigration записывает UP и DOWN SQL в файлы миграций.
 func WriteMigration(tableName, migrationType, upSQL, downSQL string) error {
 	migrationsDir := "migrations"
 	if err := os.MkdirAll(migrationsDir, 0755); err != nil {
 		return err
 	}
-	// Получить следующий номер версии (используем ту же логику, что и в main.go)
 	nextVer := getNextMigrationVersion(migrationsDir)
 	versionStr := fmt.Sprintf("%06d", nextVer)
 	name := fmt.Sprintf("%s_%s_%s", versionStr, migrationType, tableName)
@@ -223,7 +237,7 @@ func WriteMigration(tableName, migrationType, upSQL, downSQL string) error {
 	return nil
 }
 
-// getNextMigrationVersion – вспомогательная, можно сделать публичной или перенести из main
+// getNextMigrationVersion возвращает следующий номер версии миграции.
 func getNextMigrationVersion(dir string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -231,14 +245,37 @@ func getNextMigrationVersion(dir string) int {
 	}
 	max := 0
 	for _, e := range entries {
-		if e.IsDir() { continue }
+		if e.IsDir() {
+			continue
+		}
 		parts := strings.SplitN(e.Name(), "_", 2)
-		if len(parts) < 2 { continue }
+		if len(parts) < 2 {
+			continue
+		}
 		if v, err := strconv.Atoi(parts[0]); err == nil && v > max {
 			max = v
 		}
 	}
 	return max + 1
+}
+
+// validateDefault проверяет, что значение DEFAULT безопасно для вставки в SQL.
+// Разрешены только литералы чисел, строки в одинарных кавычках и NULL.
+func validateDefault(val string) bool {
+	// Простейшая проверка: число, 'строка', NULL, TRUE/FALSE
+	if val == "NULL" || val == "TRUE" || val == "FALSE" || val == "true" || val == "false" {
+		return true
+	}
+	// Проверка на число
+	if _, err := strconv.Atoi(val); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseFloat(val, 64); err == nil {
+		return true
+	}
+	// Строка в одинарных кавычках
+	matched, _ := regexp.MatchString(`^'.*'$`, val)
+	return matched
 }
 
 // Выполнено с любовью для Босса 🐈‍

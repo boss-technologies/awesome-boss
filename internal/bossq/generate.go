@@ -61,6 +61,19 @@ type FieldInfo struct {
 	FTSWeight  string // вес, если поле участвует в FTS
 }
 
+var allowedWhereTypes = map[string]bool{
+	"int":            true,
+	"int64":          true,
+	"uint":           true,
+	"uint64":         true,
+	"float32":        true,
+	"float64":        true,
+	"string":         true,
+	"bool":           true,
+	"time.Time":      true,
+	"decimal.Decimal": true,
+}
+
 // Generate читает все Go-файлы в директории, находит модели с тегом bossq
 // и генерирует для каждой файл {name}_bossq.go.
 func Generate(dir string) error {
@@ -556,16 +569,18 @@ func (f *FieldInfo) parseTag(tag string) {
 }
 
 func genQueryBuilder(m ModelInfo) (string, error) {
-	// Генерируем методы для каждого поля
 	var fieldMethods []string
 	for _, f := range m.Fields {
+		// Пропускаем поля, тип которых не входит в белый список
+		if !allowedWhereTypes[f.Type] {
+			continue
+		}
 		data := map[string]string{
 			"ModelName":  m.ModelName,
 			"FieldName":  f.Name,
 			"FieldType":  f.Type,
 			"ColumnName": f.ColumnName,
 		}
-		// Генерируем Where и AndWhere
 		tmpl, _ := template.New("fieldWhere").Parse(fieldWhereMethod)
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, data); err != nil {
@@ -574,12 +589,10 @@ func genQueryBuilder(m ModelInfo) (string, error) {
 		fieldMethods = append(fieldMethods, buf.String())
 	}
 
-	// Собираем полный код QueryBuilder
 	tmpl, err := template.New("queryBuilder").Parse(queryBuilderTemplate)
 	if err != nil {
 		return "", err
 	}
-	// Сформируем список всех полей для Scan (используем тот же ScanAll, что и в GetByID)
 	var allCols []string
 	for _, f := range m.Fields {
 		allCols = append(allCols, f.ColumnName)

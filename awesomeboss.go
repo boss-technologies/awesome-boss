@@ -274,8 +274,8 @@ func (app *BossApp) StaticFS(prefix string, fsys fs.FS) {
 func (app *BossApp) Run(addr string) error {
 	srv := &fasthttp.Server{
 		Handler:      app.router.Handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadTimeout:  app.config.Server.ReadTimeout,
+		WriteTimeout: app.config.Server.WriteTimeout,
 	}
 
 	if app.config.Server.EnableGzip {

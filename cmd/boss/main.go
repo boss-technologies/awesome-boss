@@ -170,9 +170,10 @@ func handleMakeMigrations() {
         models, err := bq.LoadModels(path)
         if err != nil {
             // Игнорируем директории без Go-файлов, но логируем другие ошибки
-            if !strings.Contains(err.Error(), "no Go files") {
-                fmt.Fprintf(os.Stderr, "⚠️ Пропущена директория %s: %v\n", path, err)
-            }
+            if !hasGoFiles(path) {
+				// Если нет — просто идём дальше, без ошибки
+				return nil
+			}
             return nil
         }
         allModels = append(allModels, models...)
