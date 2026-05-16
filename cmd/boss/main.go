@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +14,6 @@ import (
 	"github.com/boss-technologies/awesome-boss/auth"
 	bq "github.com/boss-technologies/awesome-boss/bossq"
 	"github.com/boss-technologies/awesome-boss/internal/bossq"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/joho/godotenv"
 )
 
@@ -44,6 +42,8 @@ func main() {
 		handleVersion()
 	case "make":
 		handleMakeModels()
+	case "migrations":
+		handleMigrations(os.Args[2:])
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", command)
 		printUsage()
@@ -60,11 +60,13 @@ func printUsage() {
 
 Доступные команды:
   build       Собрать проект в оптимизированный бинарник
-  generate    Генерировать артефакты (ключи, модели, миграции)
+  generate    Генерировать артефакты (ключи, модели)
+  migrations   Миграции
   make        Сгенерировать Store моделий с помощью BossQ
   new         Создать новый проект
   run         Запустить сервер с горячей перезагрузкой
   version     Показать версию
+  migrations   Миграции
 
 Для справки по команде: boss <команда> -h
 `)
@@ -107,17 +109,15 @@ func handleBuild(args []string) {
 	fmt.Printf("✅ Сборка завершена: %s\n", outName)
 }
 
-// ---------- 2. КОМАНДА generate (с подкомандами key, migration) ----------
+// ---------- 2. КОМАНДА generate (с подкомандой key) ----------
 func handleGenerate(args []string) {
 	if len(args) == 0 {
-		fmt.Println("❌ Укажите подкоманду: boss generate key|migration")
+		fmt.Println("❌ Укажите подкоманду: boss generate key")
 		os.Exit(1)
 	}
 	switch args[0] {
 	case "key":
 		handleGenerateKey(args[1:])
-	case "migration":
-		handleMakeMigrations()
 	default:
 		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
 		os.Exit(1)
@@ -144,100 +144,115 @@ func handleGenerateKey(args []string) {
 	}
 }
 
-func handleMakeMigrations() {
-    _ = godotenv.Load()
-
-    root, err := os.Getwd()
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "Ошибка получения текущей директории: %v\n", err)
-        os.Exit(1)
-    }
-    fmt.Printf("🔍 BossQ сканирует модели в '%s'...\n", root)
-
-    var allModels []bossq.ModelInfo
-    err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-        if err != nil {
-            // Пропускаем пути, к которым нет доступа
-            fmt.Fprintf(os.Stderr, "⚠️ Ошибка доступа к %s: %v\n", path, err)
-            return nil
-        }
-        if info.IsDir() {
-            name := info.Name()
-            if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
-                return filepath.SkipDir
-            }
-        }
-        models, err := bq.LoadModels(path)
-        if err != nil {
-            // Игнорируем директории без Go-файлов, но логируем другие ошибки
-            if !hasGoFiles(path) {
-				// Если нет — просто идём дальше, без ошибки
-				return nil
-			}
-            return nil
-        }
-        allModels = append(allModels, models...)
-        return nil
-    })
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "❌ Ошибка обхода директорий: %v\n", err)
-        os.Exit(1)
-    }
-
-    if len(allModels) == 0 {
-        fmt.Println("❌ Не найдено моделей с тегом bossq")
-        return
-    }
-
-    // 2. Подключаемся к БД с таймаутом
-    connString := os.Getenv("DATABASE_URL")
-    if connString == "" {
-        fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
-        os.Exit(1)
-    }
-
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-
-    pool, err := bq.NewPool(ctx, connString) // используем стандартную сигнатуру
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
-        os.Exit(1)
-    }
-    defer pool.Close()
-
-    // 3. Для каждой модели генерируем миграции
-    for _, model := range allModels {
-        dbColumns, err := bq.GetTableColumns(ctx, pool, model.TableName)
-        if err != nil {
-            // Проверяем, что ошибка связана именно с отсутствием таблицы
-            var pgErr *pgconn.PgError
-            if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
-                // Таблицы нет — создаём
-                createSQL := bq.GenerateCreateTable(model)
-                if err := bq.WriteMigration(model.TableName, "create", createSQL,
-                    "DROP TABLE IF EXISTS "+model.TableName+";"); err != nil {
-                    fmt.Fprintf(os.Stderr, "❌ Ошибка записи миграции создания для %s: %v\n", model.TableName, err)
-                    os.Exit(1)
-                }
-                continue
-            }
-            // Любая другая ошибка — фатальная
-            fmt.Fprintf(os.Stderr, "❌ Ошибка получения структуры таблицы %s: %v\n", model.TableName, err)
-            os.Exit(1)
-        }
-
-        upSQL, downSQL := bq.DiffModelWithDatabase(model, dbColumns)
-        if upSQL != "" {
-            if err := bq.WriteMigration(model.TableName, "auto", upSQL, downSQL); err != nil {
-                fmt.Fprintf(os.Stderr, "❌ Ошибка записи миграции auto для %s: %v\n", model.TableName, err)
-                os.Exit(1)
-            }
-        }
-    }
-    fmt.Println("✅ Миграции сгенерированы в папке migrations/")
+// ---------- 3. КОМАНДА migrations ----------
+func handleMigrations(args []string) {
+	if len(args) == 0 {
+		fmt.Println("❌ Укажите подкоманду: boss migrations [make|use|rollback]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "make":
+		handleMakeMigrations(args[1:])   // передаём остаток аргументов
+	case "use":
+		handleUseMigrations()
+	case "rollback":
+		handleRollbackMigration()
+	default:
+		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
+		os.Exit(1)
+	}
 }
-// ---------- 3. КОМАНДА make ----------
+
+// handleMakeMigrations 
+func handleMakeMigrations(cmdArgs []string) {
+	fs := flag.NewFlagSet("migrations make", flag.ExitOnError)
+	nameFlag := fs.String("name", "auto", "имя миграции (будет добавлено к timestamp)")
+	_ = fs.Parse(cmdArgs) // разрешаем неизвестные флаги, но обрабатываем только --name
+
+	_ = godotenv.Load()
+
+	connString := os.Getenv("DATABASE_URL")
+	if connString == "" {
+		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := bq.NewPool(ctx, connString)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	modelsDir := "models"
+	migrationsDir := "migrations"
+
+	// Пятый аргумент – имя миграции
+	if err := bq.MakeMigration(ctx, pool, modelsDir, migrationsDir, *nameFlag); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка создания миграции: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// handleUseMigrations – применяет все неприменённые миграции
+func handleUseMigrations() {
+	_ = godotenv.Load()
+
+	connString := os.Getenv("DATABASE_URL")
+	if connString == "" {
+		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := bq.NewPool(ctx, connString)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	migrationsDir := "migrations"
+	if err := bq.ApplyMigrations(ctx, pool, migrationsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка применения миграций: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// handleRollbackMigration – откатывает последнюю миграцию
+func handleRollbackMigration() {
+	_ = godotenv.Load()
+
+	connString := os.Getenv("DATABASE_URL")
+	if connString == "" {
+		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := bq.NewPool(ctx, connString)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	migrationsDir := "migrations"
+	if err := bq.RollbackLastMigration(ctx, pool, migrationsDir); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Ошибка отката миграции: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+
+// ---------- 4. КОМАНДА make ----------
 
 func handleMakeModels() {
 	root, _ := os.Getwd()
@@ -279,7 +294,7 @@ func hasGoFiles(dir string) bool {
 	return false
 }
 
-// ---------- 4. КОМАНДА new ----------
+// ---------- 5. КОМАНДА new ----------
 func handleNew(args []string) {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
 	template := fs.String("t", "normal", "Шаблон проекта (normal, fintech)")
@@ -316,11 +331,16 @@ func handleNew(args []string) {
 		os.Exit(1)
 	}
 
+	if err := exec.Command("go", "mod", "tidy").Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Ошибка коррекции go mod tidy: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("✅ Проект %s создан. Перейдите в папку и выполните 'boss run'\n", projectName)
 	fmt.Println("/\\ /\\ Awesome Boss🐱")
 }
 
-// ---------- 5. КОМАНДА run ----------
+// ---------- 6. КОМАНДА run ----------
 func handleRun() {
 	// Проверяем, есть ли main.go
 	if _, err := os.Stat("main.go"); os.IsNotExist(err) {
@@ -350,7 +370,7 @@ func handleRun() {
 	}
 }
 
-// ---------- 6. КОМАНДА version ----------
+// ---------- 7. КОМАНДА version ----------
 func handleVersion() {
 	fmt.Printf("Awesome Boss и Boss CLI версия: %s\n", version)
 	fmt.Printf("Версия Go: %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -582,7 +602,6 @@ import (
     "` + projectName + `/handlers"
     "github.com/boss-technologies/awesome-boss"
     "github.com/boss-technologies/awesome-boss/config"
-    "github.com/boss-technologies/awesome-boss"
 )
 
 func main() {

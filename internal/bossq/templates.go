@@ -60,6 +60,21 @@ func (s *{{.StoreName}}) GetByID(ctx context.Context, id int64) (*{{.ModelName}}
 }
 `
 
+const getByUniqueMethodTemplate = `
+// GetBy{{.FieldName}} находит запись по уникальному полю {{.ColumnName}}.
+func (s *{{.StoreName}}) GetBy{{.FieldName}}(ctx context.Context, value {{.FieldType}}) (*{{.ModelName}}, error) {
+    m := &{{.ModelName}}{}
+    err := s.pool.QueryRow(ctx,
+        ` + "`SELECT {{.AllColumns}} FROM {{.TableName}} WHERE {{.ColumnName}} = $1`" + `,
+        value,
+    ).Scan({{.ScanAll}})
+    if err != nil {
+        return nil, fmt.Errorf("get {{.TableName}} by {{.ColumnName}} %v: %w", value, err)
+    }
+    return m, nil
+}
+`
+
 const updateMethod = `
 // Update обновляет все поля записи.
 func (s *{{.StoreName}}) Update(ctx context.Context, m *{{.ModelName}}) error {

@@ -15,19 +15,21 @@ import (
 
 // ModelInfo хранит разобранную информацию о модели.
 type ModelInfo struct {
-	Package    string
-	ModelName  string
-	StoreName  string
-	TableName  string
-	Fields     []FieldInfo
-	PKField    string
-	PKColumn   string
-	Relations  []RelationInfo
-	Imports    []string
-	SourceFile string // путь к исходному файлу, чтобы сгенерировать рядом
+	Package      string
+	ModelName    string
+	StoreName    string
+	TableName    string
+	Fields       []FieldInfo
+	UniqueFields []FieldInfo
+	PKField      string
+	PKColumn     string
+	Relations    []RelationInfo
+	Imports      []string
+	SourceFile   string // путь к исходному файлу, чтобы сгенерировать рядом
 	// FTS
 	FTSLanguage string         // язык полнотекстового поиска, например "ru_hunspell"
 	FTSFields   []FTSFieldInfo // поля, участвующие в FTS с весами
+
 }
 
 // FTSFieldInfo описывает одно поле для полнотекстового поиска.
@@ -59,18 +61,19 @@ type FieldInfo struct {
 	DefaultVal string
 	Tag        string
 	FTSWeight  string // вес, если поле участвует в FTS
+	IsUnique   bool
 }
 
 var allowedWhereTypes = map[string]bool{
-	"int":            true,
-	"int64":          true,
-	"uint":           true,
-	"uint64":         true,
-	"float32":        true,
-	"float64":        true,
-	"string":         true,
-	"bool":           true,
-	"time.Time":      true,
+	"int":             true,
+	"int64":           true,
+	"uint":            true,
+	"uint64":          true,
+	"float32":         true,
+	"float64":         true,
+	"string":          true,
+	"bool":            true,
+	"time.Time":       true,
 	"decimal.Decimal": true,
 }
 
@@ -206,7 +209,6 @@ func extractModels(file *ast.File) []ModelInfo {
 					Name: field.Names[0].Name,
 					Type: typeToString(field.Type),
 				}
-
 				// Обрабатываем тег
 				if field.Tag != nil {
 					tag := strings.Trim(field.Tag.Value, "`")
@@ -242,6 +244,12 @@ func extractModels(file *ast.File) []ModelInfo {
 						ColumnName: fInfo.ColumnName,
 						Weight:     fInfo.FTSWeight,
 					})
+				}
+			}
+
+			for _, f := range model.Fields {
+				if f.IsUnique {
+					model.UniqueFields = append(model.UniqueFields, f)
 				}
 			}
 
@@ -291,6 +299,15 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 		return err
 	}
 	methods = append(methods, relMethods...)
+
+	// Генерация методов GetBy для уникальных полей
+	for _, uf := range model.UniqueFields {
+		getMethod, err := genGetByUniqueMethod(model, uf)
+		if err != nil {
+			return err
+		}
+		methods = append(methods, getMethod)
+	}
 
 	// Добавляем FTS методы, если задан язык и есть поля
 	if model.FTSLanguage != "" && len(model.FTSFields) > 0 {
@@ -385,6 +402,37 @@ func genGetByIDMethod(m ModelInfo) (string, error) {
 	tmpl, _ := template.New("getbyid").Parse(getByIDMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
+	return buf.String(), nil
+}
+
+// genGetByUniqueMethod генерирует метод GetBy<FieldName> для уникального поля.
+func genGetByUniqueMethod(m ModelInfo, field FieldInfo) (string, error) {
+	allCols := make([]string, len(m.Fields))
+	scanAll := make([]string, len(m.Fields))
+	for i, f := range m.Fields {
+		allCols[i] = f.ColumnName
+		scanAll[i] = "&m." + f.Name
+	}
+
+	data := map[string]string{
+		"StoreName":  m.StoreName,
+		"ModelName":  m.ModelName,
+		"TableName":  m.TableName,
+		"FieldName":  field.Name,
+		"ColumnName": field.ColumnName,
+		"FieldType":  field.Type,
+		"AllColumns": strings.Join(allCols, ", "),
+		"ScanAll":    strings.Join(scanAll, ", "),
+	}
+
+	tmpl, err := template.New("getByUnique").Parse(getByUniqueMethodTemplate)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
 	return buf.String(), nil
 }
 
@@ -564,6 +612,8 @@ func (f *FieldInfo) parseTag(tag string) {
 			f.ColumnName = strings.TrimPrefix(part, "column=")
 		case strings.HasPrefix(part, "fts="):
 			f.FTSWeight = strings.TrimPrefix(part, "fts=")
+		case part == "unique": // <-- добавить
+			f.IsUnique = true
 		}
 	}
 }
