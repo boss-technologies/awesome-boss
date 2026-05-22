@@ -10,59 +10,10 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/boss-technologies/awesome-boss/bossq"
+
 	"golang.org/x/tools/go/packages"
 )
-
-// ModelInfo хранит разобранную информацию о модели.
-type ModelInfo struct {
-	Package      string
-	ModelName    string
-	StoreName    string
-	TableName    string
-	Fields       []FieldInfo
-	UniqueFields []FieldInfo
-	PKField      string
-	PKColumn     string
-	Relations    []RelationInfo
-	Imports      []string
-	SourceFile   string // путь к исходному файлу, чтобы сгенерировать рядом
-	// FTS
-	FTSLanguage string         // язык полнотекстового поиска, например "ru_hunspell"
-	FTSFields   []FTSFieldInfo // поля, участвующие в FTS с весами
-
-}
-
-// FTSFieldInfo описывает одно поле для полнотекстового поиска.
-type FTSFieldInfo struct {
-	FieldName  string
-	ColumnName string
-	Weight     string // A, B, C, D
-}
-
-// RelationInfo описывает одну связь модели.
-type RelationInfo struct {
-	Name       string
-	Type       string
-	Model      string
-	ForeignKey string // внешний ключ в целевой таблице (для HasMany) или имя поля в текущей модели (для BelongsTo)
-	References string // пока не используется
-	FKField    string // имя поля внешнего ключа в текущей модели (для BelongsTo)
-}
-
-// FieldInfo описывает одно поле модели.
-type FieldInfo struct {
-	Name       string
-	Type       string
-	ColumnName string
-	IsPK       bool
-	IsAutoinc  bool
-	IsNotNull  bool
-	HasDefault bool
-	DefaultVal string
-	Tag        string
-	FTSWeight  string // вес, если поле участвует в FTS
-	IsUnique   bool
-}
 
 var allowedWhereTypes = map[string]bool{
 	"int":             true,
@@ -92,13 +43,12 @@ func Generate(dir string) error {
 		return fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
 	}
 
-	var allModels []ModelInfo
+	var allModels []bossq.ModelInfo
 	for _, pkg := range pkgs {
 		for i, file := range pkg.Syntax {
 			models := extractModels(file)
 			for j := range models {
 				models[j].Package = pkg.Name
-				// Используем реальный путь из pkg.GoFiles
 				models[j].SourceFile = pkg.GoFiles[i]
 			}
 			allModels = append(allModels, models...)
@@ -106,12 +56,10 @@ func Generate(dir string) error {
 	}
 
 	if len(allModels) == 0 {
-		// Не ошибка: просто в этой папке нет моделей.
 		return nil
 	}
 
-	// Карта моделей для связей.
-	modelMap := make(map[string]ModelInfo, len(allModels))
+	modelMap := make(map[string]bossq.ModelInfo, len(allModels))
 	for _, m := range allModels {
 		modelMap[m.ModelName] = m
 	}
@@ -125,8 +73,8 @@ func Generate(dir string) error {
 }
 
 // extractModels проходит по AST-файлу и собирает все структуры с тегом bossq.
-func extractModels(file *ast.File) []ModelInfo {
-	var models []ModelInfo
+func extractModels(file *ast.File) []bossq.ModelInfo {
+	var models []bossq.ModelInfo
 
 	for _, decl := range file.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
@@ -134,8 +82,6 @@ func extractModels(file *ast.File) []ModelInfo {
 			continue
 		}
 
-		// Комментарий может быть у самого GenDecl (группа типов) или у отдельной спецификации.
-		// Сначала смотрим в GenDecl.Doc (или GenDecl.Comment для висячего комментария).
 		tableName := ""
 		ftsLanguage := ""
 		if genDecl.Doc != nil {
@@ -149,21 +95,17 @@ func extractModels(file *ast.File) []ModelInfo {
 				}
 			}
 		}
-		// Никакой проверки genDecl.Comment! Её здесь быть не должно.
 
 		if tableName == "" {
-			continue // это не наша модель, пропускаем группу
+			continue
 		}
 
-		// Теперь обходим все спецификации типов внутри этой группы
 		for _, spec := range genDecl.Specs {
 			typeSpec, ok := spec.(*ast.TypeSpec)
 			if !ok {
 				continue
 			}
 
-			// Если у конкретного типа есть свой Doc, он переопределяет групповой?
-			// Для простоты, если у спецификации есть свой комментарий с table=, используем его.
 			localTable := tableName
 			localFTS := ftsLanguage
 			if typeSpec.Doc != nil {
@@ -193,38 +135,33 @@ func extractModels(file *ast.File) []ModelInfo {
 				continue
 			}
 
-			model := ModelInfo{
+			model := bossq.ModelInfo{
 				ModelName:   typeSpec.Name.Name,
 				StoreName:   typeSpec.Name.Name + "Store",
 				TableName:   localTable,
 				FTSLanguage: localFTS,
 			}
 
-			// Обход полей структуры
 			for _, field := range structType.Fields.List {
 				if len(field.Names) == 0 {
 					continue
 				}
-				fInfo := FieldInfo{
+				fInfo := bossq.FieldInfo{
 					Name: field.Names[0].Name,
 					Type: typeToString(field.Type),
 				}
-				// Обрабатываем тег
 				if field.Tag != nil {
 					tag := strings.Trim(field.Tag.Value, "`")
-					// Сначала проверяем, не является ли поле связью
 					relTag := extractRelationTag(tag)
 					if relTag.Type != "" {
 						relTag.Name = field.Names[0].Name
 						model.Relations = append(model.Relations, relTag)
-						continue // связь не попадает в список полей для SQL
+						continue
 					}
-					// Обычное поле: парсим тег
 					fInfo.Tag = tag
-					fInfo.parseTag(tag)
+					fInfo.ParseTag(tag)
 				}
 
-				// Имя колонки по умолчанию = snake_case имени поля
 				if fInfo.ColumnName == "" {
 					fInfo.ColumnName = toSnakeCase(fInfo.Name)
 				}
@@ -234,12 +171,10 @@ func extractModels(file *ast.File) []ModelInfo {
 					model.PKColumn = fInfo.ColumnName
 				}
 
-				// Добавляем поле в модель
 				model.Fields = append(model.Fields, fInfo)
 
-				// Если поле имеет вес FTS, добавляем в список FTSFields
 				if fInfo.FTSWeight != "" {
-					model.FTSFields = append(model.FTSFields, FTSFieldInfo{
+					model.FTSFields = append(model.FTSFields, bossq.FTSFieldInfo{
 						FieldName:  fInfo.Name,
 						ColumnName: fInfo.ColumnName,
 						Weight:     fInfo.FTSWeight,
@@ -261,13 +196,12 @@ func extractModels(file *ast.File) []ModelInfo {
 }
 
 // writeStoreFile генерирует файл *_bossq.go для одной модели.
-func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]ModelInfo) error {
+func writeStoreFile(originalFile string, model bossq.ModelInfo, allModels map[string]bossq.ModelInfo) error {
 	tmpl, err := template.New("store").Parse(storeTemplate)
 	if err != nil {
 		return err
 	}
 
-	// Генерируем методы
 	var methods []string
 
 	if create, err := genCreateMethod(model); err == nil {
@@ -300,7 +234,6 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 	}
 	methods = append(methods, relMethods...)
 
-	// Генерация методов GetBy для уникальных полей
 	for _, uf := range model.UniqueFields {
 		getMethod, err := genGetByUniqueMethod(model, uf)
 		if err != nil {
@@ -309,7 +242,6 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 		methods = append(methods, getMethod)
 	}
 
-	// Добавляем FTS методы, если задан язык и есть поля
 	if model.FTSLanguage != "" && len(model.FTSFields) > 0 {
 		if search, err := genSearchMethod(model); err == nil {
 			methods = append(methods, search)
@@ -336,16 +268,17 @@ func writeStoreFile(originalFile string, model ModelInfo, allModels map[string]M
 		return err
 	}
 
-	// Имя выходного файла: models.go -> models_bossq.go
 	base := strings.TrimSuffix(filepath.Base(originalFile), ".go")
 	outFileName := filepath.Join(filepath.Dir(originalFile), base+"_bossq.go")
 	return os.WriteFile(outFileName, buf.Bytes(), 0644)
 }
 
-// ====================== Вспомогательные генераторы методов ======================
+// ---------------------- Методы ----------------------
 
-func genCreateMethod(m ModelInfo) (string, error) {
-	var insertCols, insertPlaceholders, returningCols, insertVals, scanReturning, copyBack []string
+// genCreateMethod генерирует Create: с RETURNING если есть autoinc, иначе простой INSERT.
+func genCreateMethod(m bossq.ModelInfo) (string, error) {
+	var insertCols, insertPlaceholders, insertVals []string
+	var returningCols, scanReturning []string
 	idx := 0
 	for _, f := range m.Fields {
 		if f.IsAutoinc {
@@ -357,22 +290,41 @@ func genCreateMethod(m ModelInfo) (string, error) {
 		insertCols = append(insertCols, f.ColumnName)
 		insertPlaceholders = append(insertPlaceholders, fmt.Sprintf("$%d", idx))
 		insertVals = append(insertVals, "m."+f.Name)
-		copyBack = append(copyBack, fmt.Sprintf("newM.%s = m.%s", f.Name, f.Name))
 	}
 
+	if len(returningCols) > 0 {
+		// Есть автоинкрементные поля – используем RETURNING
+		data := map[string]string{
+			"StoreName":          m.StoreName,
+			"ModelName":          m.ModelName,
+			"TableName":          m.TableName,
+			"InsertColumns":      strings.Join(insertCols, ", "),
+			"InsertPlaceholders": strings.Join(insertPlaceholders, ", "),
+			"ReturningColumns":   strings.Join(returningCols, ", "),
+			"InsertValues":       strings.Join(insertVals, ", "),
+			"ScanReturning":      strings.Join(scanReturning, ", "),
+		}
+		tmpl, err := template.New("createReturning").Parse(createReturningMethod)
+		if err != nil {
+			return "", err
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return "", err
+		}
+		return buf.String(), nil
+	}
+
+	// Нет автоинкремента – простой INSERT, возвращаем переданную модель
 	data := map[string]string{
 		"StoreName":          m.StoreName,
 		"ModelName":          m.ModelName,
 		"TableName":          m.TableName,
 		"InsertColumns":      strings.Join(insertCols, ", "),
 		"InsertPlaceholders": strings.Join(insertPlaceholders, ", "),
-		"ReturningColumns":   strings.Join(returningCols, ", "),
 		"InsertValues":       strings.Join(insertVals, ", "),
-		"ScanReturning":      strings.Join(scanReturning, ", "),
-		"CopyBackFields":     strings.Join(copyBack, "\n\t"),
 	}
-
-	tmpl, err := template.New("create").Parse(createMethod)
+	tmpl, err := template.New("createSimple").Parse(createSimpleMethod)
 	if err != nil {
 		return "", err
 	}
@@ -383,13 +335,12 @@ func genCreateMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
-func genGetByIDMethod(m ModelInfo) (string, error) {
+func genGetByIDMethod(m bossq.ModelInfo) (string, error) {
 	var allCols, scanAll []string
 	for _, f := range m.Fields {
 		allCols = append(allCols, f.ColumnName)
 		scanAll = append(scanAll, "&m."+f.Name)
 	}
-
 	data := map[string]string{
 		"StoreName":  m.StoreName,
 		"ModelName":  m.ModelName,
@@ -398,22 +349,19 @@ func genGetByIDMethod(m ModelInfo) (string, error) {
 		"AllColumns": strings.Join(allCols, ", "),
 		"ScanAll":    strings.Join(scanAll, ", "),
 	}
-
 	tmpl, _ := template.New("getbyid").Parse(getByIDMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
 	return buf.String(), nil
 }
 
-// genGetByUniqueMethod генерирует метод GetBy<FieldName> для уникального поля.
-func genGetByUniqueMethod(m ModelInfo, field FieldInfo) (string, error) {
+func genGetByUniqueMethod(m bossq.ModelInfo, field bossq.FieldInfo) (string, error) {
 	allCols := make([]string, len(m.Fields))
 	scanAll := make([]string, len(m.Fields))
 	for i, f := range m.Fields {
 		allCols[i] = f.ColumnName
 		scanAll[i] = "&m." + f.Name
 	}
-
 	data := map[string]string{
 		"StoreName":  m.StoreName,
 		"ModelName":  m.ModelName,
@@ -424,7 +372,6 @@ func genGetByUniqueMethod(m ModelInfo, field FieldInfo) (string, error) {
 		"AllColumns": strings.Join(allCols, ", "),
 		"ScanAll":    strings.Join(scanAll, ", "),
 	}
-
 	tmpl, err := template.New("getByUnique").Parse(getByUniqueMethodTemplate)
 	if err != nil {
 		return "", err
@@ -436,7 +383,7 @@ func genGetByUniqueMethod(m ModelInfo, field FieldInfo) (string, error) {
 	return buf.String(), nil
 }
 
-func genListPaginatedMethod(m ModelInfo) (string, error) {
+func genListPaginatedMethod(m bossq.ModelInfo) (string, error) {
 	var allCols, scanAll []string
 	for _, f := range m.Fields {
 		allCols = append(allCols, f.ColumnName)
@@ -456,7 +403,7 @@ func genListPaginatedMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
-func genUpdateMethod(m ModelInfo) (string, error) {
+func genUpdateMethod(m bossq.ModelInfo) (string, error) {
 	var setClauses, updateVals []string
 	idx := 0
 	for _, f := range m.Fields {
@@ -470,7 +417,6 @@ func genUpdateMethod(m ModelInfo) (string, error) {
 	idx++
 	pkIdx := idx
 	updateVals = append(updateVals, "m."+m.PKField)
-
 	data := map[string]string{
 		"StoreName":    m.StoreName,
 		"ModelName":    m.ModelName,
@@ -481,14 +427,13 @@ func genUpdateMethod(m ModelInfo) (string, error) {
 		"SetClauses":   strings.Join(setClauses, ", "),
 		"UpdateValues": strings.Join(updateVals, ", "),
 	}
-
 	tmpl, _ := template.New("update").Parse(updateMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
 	return buf.String(), nil
 }
 
-func genDeleteMethod(m ModelInfo) (string, error) {
+func genDeleteMethod(m bossq.ModelInfo) (string, error) {
 	tmpl, _ := template.New("delete").Parse(deleteMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, map[string]string{
@@ -499,13 +444,12 @@ func genDeleteMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
-func genListMethod(m ModelInfo) (string, error) {
+func genListMethod(m bossq.ModelInfo) (string, error) {
 	var allCols, scanAll []string
 	for _, f := range m.Fields {
 		allCols = append(allCols, f.ColumnName)
 		scanAll = append(scanAll, "&m."+f.Name)
 	}
-
 	data := map[string]string{
 		"StoreName":  m.StoreName,
 		"ModelName":  m.ModelName,
@@ -514,14 +458,13 @@ func genListMethod(m ModelInfo) (string, error) {
 		"AllColumns": strings.Join(allCols, ", "),
 		"ScanAll":    strings.Join(scanAll, ", "),
 	}
-
 	tmpl, _ := template.New("list").Parse(listMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
 	return buf.String(), nil
 }
 
-func genBulkInsertMethod(m ModelInfo) (string, error) {
+func genBulkInsertMethod(m bossq.ModelInfo) (string, error) {
 	var colNames, copyVals []string
 	for _, f := range m.Fields {
 		if f.IsAutoinc {
@@ -530,7 +473,6 @@ func genBulkInsertMethod(m ModelInfo) (string, error) {
 		colNames = append(colNames, `"`+f.ColumnName+`"`)
 		copyVals = append(copyVals, "m."+f.Name)
 	}
-
 	data := map[string]string{
 		"StoreName":          m.StoreName,
 		"ModelName":          m.ModelName,
@@ -538,90 +480,17 @@ func genBulkInsertMethod(m ModelInfo) (string, error) {
 		"ColumnNamesForCopy": strings.Join(colNames, ", "),
 		"CopyValues":         strings.Join(copyVals, ", "),
 	}
-
 	tmpl, _ := template.New("bulkinsert").Parse(bulkInsertMethod)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, data)
 	return buf.String(), nil
 }
 
-// ====================== Утилиты ======================
+// ---------------------- QueryBuilder ----------------------
 
-// typeToString преобразует ast.Expr в строку типа Go.
-func typeToString(expr ast.Expr) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name
-	case *ast.SelectorExpr:
-		return typeToString(t.X) + "." + t.Sel.Name
-	case *ast.ArrayType:
-		return "[]" + typeToString(t.Elt)
-	case *ast.StarExpr:
-		return "*" + typeToString(t.X)
-	default:
-		return fmt.Sprintf("%T", expr)
-	}
-}
-
-// toSnakeCase переводит CamelCase в snake_case.
-func toSnakeCase(s string) string {
-	var result []byte
-	for i, c := range s {
-		if c >= 'A' && c <= 'Z' {
-			if i > 0 {
-				result = append(result, '_')
-			}
-			result = append(result, byte(c+32))
-		} else {
-			result = append(result, byte(c))
-		}
-	}
-	return string(result)
-}
-
-// parseTag разбирает тег bossq.
-func (f *FieldInfo) parseTag(tag string) {
-	// Ищем значение bossq:"..."
-	start := strings.Index(tag, `bossq:"`)
-	if start == -1 {
-		return
-	}
-	start += len(`bossq:"`)
-	end := strings.Index(tag[start:], `"`)
-	if end == -1 {
-		return
-	}
-	value := tag[start : start+end]
-
-	parts := strings.SplitSeq(value, ",")
-	for part := range parts {
-		part = strings.TrimSpace(part)
-		switch {
-		case part == "pk":
-			f.IsPK = true
-		case part == "autoinc":
-			f.IsAutoinc = true
-		case part == "notnull":
-			f.IsNotNull = true
-		case strings.HasPrefix(part, "type="):
-			// учитываем, но не обрабатываем здесь
-		case strings.HasPrefix(part, "default="):
-			f.HasDefault = true
-			f.DefaultVal = strings.TrimPrefix(part, "default=")
-		case strings.HasPrefix(part, "column="):
-			f.ColumnName = strings.TrimPrefix(part, "column=")
-		case strings.HasPrefix(part, "fts="):
-			f.FTSWeight = strings.TrimPrefix(part, "fts=")
-		case part == "unique": // <-- добавить
-			f.IsUnique = true
-		}
-	}
-}
-
-func genQueryBuilder(m ModelInfo) (string, error) {
+func genQueryBuilder(m bossq.ModelInfo) (string, error) {
 	var fieldMethods []string
 	for _, f := range m.Fields {
-		// Пропускаем поля, тип которых не входит в белый список
 		if !allowedWhereTypes[f.Type] {
 			continue
 		}
@@ -631,7 +500,7 @@ func genQueryBuilder(m ModelInfo) (string, error) {
 			"FieldType":  f.Type,
 			"ColumnName": f.ColumnName,
 		}
-		tmpl, _ := template.New("fieldWhere").Parse(fieldWhereMethod)
+		tmpl, _ := template.New("fieldWhere").Parse(fieldWhereMethod) // теперь только Where, без AndWhere
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, data); err != nil {
 			return "", err
@@ -643,15 +512,10 @@ func genQueryBuilder(m ModelInfo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var allCols []string
-	for _, f := range m.Fields {
-		allCols = append(allCols, f.ColumnName)
-	}
 	scanAll := make([]string, len(m.Fields))
 	for i, f := range m.Fields {
 		scanAll[i] = "&m." + f.Name
 	}
-
 	data := struct {
 		ModelName    string
 		TableName    string
@@ -669,64 +533,52 @@ func genQueryBuilder(m ModelInfo) (string, error) {
 	}
 	return buf.String(), nil
 }
-
-func extractRelationTag(tag string) RelationInfo {
+// ---------------------- Связи ----------------------
+func extractRelationTag(tag string) bossq.RelationInfo {
 	start := strings.Index(tag, `bossq:"`)
 	if start == -1 {
-		return RelationInfo{}
+		return bossq.RelationInfo{}
 	}
 	start += len(`bossq:"`)
 	end := strings.Index(tag[start:], `"`)
 	if end == -1 {
-		return RelationInfo{}
+		return bossq.RelationInfo{}
 	}
 	value := tag[start : start+end]
 
+	// hasMany:Model.ForeignKey
 	if strings.HasPrefix(value, "hasMany:") {
 		parts := strings.Split(value[len("hasMany:"):], ".")
 		if len(parts) == 2 {
-			return RelationInfo{
+			return bossq.RelationInfo{
 				Type:       "HasMany",
 				Model:      parts[0],
-				ForeignKey: parts[1], // Book.AuthorID -> ForeignKey = AuthorID
+				ForeignKey: parts[1],
 			}
-		}
-	} else if strings.HasPrefix(value, "belongsTo:") {
-		// Разбираем модель и опциональный fk
-		rest := value[len("belongsTo:"):]
-		// Проверяем наличие скобок
-		modelName := rest
-		fkField := ""
-		if before, after, ok := strings.Cut(rest, "("); ok {
-			modelName = before
-			// Извлекаем fk=... из скобок
-			after := after
-			if before, _, ok := strings.Cut(after, ")"); ok {
-				opts := before
-				for opt := range strings.SplitSeq(opts, ",") {
-					opt = strings.TrimSpace(opt)
-					if after0, ok := strings.CutPrefix(opt, "fk="); ok {
-						fkField = after0
-					}
-				}
-			}
-		}
-		if fkField == "" {
-			fkField = modelName + "ID" // конвенция по умолчанию
-		}
-		return RelationInfo{
-			Type:    "BelongsTo",
-			Model:   modelName,
-			FKField: fkField,
 		}
 	}
-	return RelationInfo{}
+
+	// belongsTo:Model.ForeignKey
+	if strings.HasPrefix(value, "belongsTo:") {
+		parts := strings.Split(value[len("belongsTo:"):], ".")
+		if len(parts) == 2 {
+			return bossq.RelationInfo{
+				Type:    "BelongsTo",
+				Model:   parts[0],
+				FKField: parts[1],
+			}
+		}
+	}
+
+	return bossq.RelationInfo{}
 }
 
-// genRelationMethods генерирует код методов загрузки связей для модели.
-func genRelationMethods(model ModelInfo, allModels map[string]ModelInfo) ([]string, error) {
+func genRelationMethods(model bossq.ModelInfo, allModels map[string]bossq.ModelInfo) ([]string, error) {
 	var methods []string
 	for _, rel := range model.Relations {
+		if rel.FKField == "" && rel.Type == "BelongsTo" {
+			return nil, fmt.Errorf("для связи BelongsTo в модели %s поле FKField не указано (используйте формат belongsTo:Model.Field)", model.ModelName)
+		}
 		targetModel, ok := allModels[rel.Model]
 		if !ok {
 			return nil, fmt.Errorf("модель %q не найдена для связи %q", rel.Model, rel.Name)
@@ -749,8 +601,7 @@ func genRelationMethods(model ModelInfo, allModels map[string]ModelInfo) ([]stri
 	return methods, nil
 }
 
-// genHasManyMethod генерирует метод Load<Relation> для загрузки слайса связанных объектов.
-func genHasManyMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (string, error) {
+func genHasManyMethod(parent bossq.ModelInfo, rel bossq.RelationInfo, target bossq.ModelInfo) (string, error) {
 	var scanFields []string
 	for _, f := range target.Fields {
 		scanFields = append(scanFields, "&item."+f.Name)
@@ -763,7 +614,7 @@ func genHasManyMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (str
 		"ForeignKey":   rel.ForeignKey,
 		"PKField":      parent.PKField,
 		"ScanFields":   strings.Join(scanFields, ", "),
-		"FieldType":    "[]" + rel.Model, // тип поля в родителе
+		"FieldType":    "[]" + rel.Model,
 	}
 	tmpl, err := template.New("hasmany").Parse(loadHasManyTemplate)
 	if err != nil {
@@ -776,9 +627,7 @@ func genHasManyMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (str
 	return buf.String(), nil
 }
 
-// genBelongsToMethod генерирует метод Load<Relation> для загрузки одиночного связанного объекта.
-func genBelongsToMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (string, error) {
-	// scanFields для целевой модели
+func genBelongsToMethod(parent bossq.ModelInfo, rel bossq.RelationInfo, target bossq.ModelInfo) (string, error) {
 	var scanFields []string
 	for _, f := range target.Fields {
 		scanFields = append(scanFields, "&item."+f.Name)
@@ -804,9 +653,9 @@ func genBelongsToMethod(parent ModelInfo, rel RelationInfo, target ModelInfo) (s
 	return buf.String(), nil
 }
 
-// ----------------- FTS генераторы -----------------
+// ---------------------- FTS ----------------------
 
-func genSearchMethod(m ModelInfo) (string, error) {
+func genSearchMethod(m bossq.ModelInfo) (string, error) {
 	var allCols, scanAll []string
 	for _, f := range m.Fields {
 		allCols = append(allCols, f.ColumnName)
@@ -828,9 +677,8 @@ func genSearchMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
-func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
+func genSearchWithHeadlineMethod(m bossq.ModelInfo) (string, error) {
 	var selectParts, scanParts []string
-	// Для структуры SearchResult нам нужны поля снова
 	type fieldStruct struct{ Name, Type string }
 	var fieldsForStruct []fieldStruct
 
@@ -840,7 +688,6 @@ func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
 		fieldsForStruct = append(fieldsForStruct, fieldStruct{f.Name, f.Type})
 	}
 
-	// Используем первое FTS поле в ts_headline (можно улучшить)
 	headlineField := m.FTSFields[0].ColumnName
 	selectWithHeadline := strings.Join(selectParts, ", ") +
 		fmt.Sprintf(`, ts_headline('%s', %s, plainto_tsquery('%s', $2), 'MaxWords=30, MinWords=15') AS headline`,
@@ -875,32 +722,135 @@ func genSearchWithHeadlineMethod(m ModelInfo) (string, error) {
 	return buf.String(), nil
 }
 
-// ExtractModelsFromDir сканирует все Go-файлы в директории и возвращает найденные модели.
-func ExtractModelsFromDir(dir string) ([]ModelInfo, error) {
-	cfg := &packages.Config{
-		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypesInfo,
-		Dir:  dir,
-	}
-	pkgs, err := packages.Load(cfg, ".")
-	if err != nil {
-		return nil, fmt.Errorf("packages.Load: %w", err)
-	}
-	if packages.PrintErrors(pkgs) > 0 {
-		return nil, fmt.Errorf("в пакете %s есть ошибки компиляции", dir)
-	}
+// ---------------------- Утилиты ----------------------
 
-	var allModels []ModelInfo
-	for _, pkg := range pkgs {
-		for i, file := range pkg.Syntax {
-			models := extractModels(file)
-			for j := range models {
-				models[j].Package = pkg.Name
-				models[j].SourceFile = pkg.GoFiles[i]
-			}
-			allModels = append(allModels, models...)
-		}
+func typeToString(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		return typeToString(t.X) + "." + t.Sel.Name
+	case *ast.ArrayType:
+		return "[]" + typeToString(t.Elt)
+	case *ast.StarExpr:
+		return "*" + typeToString(t.X)
+	default:
+		return fmt.Sprintf("%T", expr)
 	}
-	return allModels, nil
 }
 
-// Выполнено с любовью для Босса 🐈
+// toSnakeCase обрабатывает CamelCase и аббревиатуры.
+func toSnakeCase(s string) string {
+	// Список часто встречающихся аббревиатур, которые должны оставаться в нижнем регистре без разбиения.
+	abbreviations := map[string]string{
+		"ID":  "id",
+		"URL": "url",
+		"URI": "uri",
+		"HTTP": "http",
+		"HTTPS": "https",
+		"API": "api",
+		"JSON": "json",
+		"XML": "xml",
+		"SQL": "sql",
+		"UUID": "uuid",
+		"JWT": "jwt",
+		"CSV": "csv",
+		"HTML": "html",
+		"CSS": "css",
+		"JS": "js",
+		"PDF": "pdf",
+		"TXT": "txt",
+		"ZIP": "zip",
+		"RAR": "rar",
+		"EXE": "exe",
+		"BIN": "bin",
+		"IMG": "img",
+		"PNG": "png",
+		"JPG": "jpg",
+		"JPEG": "jpeg",
+		"GIF": "gif",
+		"SVG": "svg",
+		"MP3": "mp3",
+		"MP4": "mp4",
+		"AVI": "avi",
+		"MKV": "mkv",
+		"MOV": "mov",
+		"WAV": "wav",
+		"FLAC": "flac",
+		"OGG": "ogg",
+		"WEBM": "webm",
+		"WEBP": "webp",
+		"BMP": "bmp",
+		"ICO": "ico",
+		"TIF": "tif",
+		"TIFF": "tiff",
+		"PSD": "psd",
+		"AI": "ai",
+		"EPS": "eps",
+		"INDD": "indd",
+		"RAW": "raw",
+		"CR2": "cr2",
+		"NEF": "nef",
+		"ORF": "orf",
+		"SRW": "srw",
+		"ARW": "arw",
+		"DNG": "dng",
+		"MRW": "mrw",
+		"PEF": "pef",
+		"RAF": "raf",
+		"RW2": "rw2",
+		"X3F": "x3f",
+		"3FR": "3fr",
+		"FFF": "fff",
+		"DCR": "dcr",
+		"KDC": "kdc",
+		"MEF": "mef",
+		"MOS": "mos",
+		"NRW": "nrw",
+		"RWL": "rwl",
+		"SR2": "sr2",
+		"SRF": "srf",
+		"XMF": "xmf",
+		"ERF": "erf",
+		"IIQ": "iiq",
+	}
+
+	// Прямое совпадение
+	if lower, ok := abbreviations[s]; ok {
+		return lower
+	}
+
+	// Общая логика для CamelCase с поддержкой аббревиатур на лету (простая)
+	var result []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			// Проверяем, не начинается ли здесь аббревиатура
+			if i+1 < len(s) && s[i+1] >= 'A' && s[i+1] <= 'Z' {
+				// Это часть аббревиатуры – пройдём до конца аббревиатуры
+				j := i
+				for j < len(s) && s[j] >= 'A' && s[j] <= 'Z' {
+					j++
+				}
+				abbr := s[i:j]
+				if lowerAbbr, ok := abbreviations[abbr]; ok {
+					if i > 0 {
+						result = append(result, '_')
+					}
+					result = append(result, lowerAbbr...)
+					i = j - 1
+					continue
+				}
+			}
+			// Обычная заглавная буква
+			if i > 0 {
+				result = append(result, '_')
+			}
+			result = append(result, c+32)
+		} else {
+			result = append(result, c)
+		}
+	}
+	return string(result)
+}
+// Выполнено с любовью для Босса 🐈‍

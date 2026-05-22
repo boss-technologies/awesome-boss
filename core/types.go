@@ -33,7 +33,7 @@ func fastUnmarshal(data []byte, v any) error {
     return json.Unmarshal(data, v)
 }
 
-// BossContext — контекст запроса. User пока interface{} (будет типизирован через утилиты)
+// BossContext — контекст запроса. 
 type BossContext struct {
 	*fasthttp.RequestCtx
 	User  *auth.User
@@ -131,6 +131,9 @@ func SetTyped[T any](c *BossContext, key string, val T) {
 // BindJSON декодирует тело запроса в указанный тип (теперь с fastUnmarshal)
 func BindJSON[T any](c *BossContext) (T, error) {
     var result T
+	if len(c.Request.Body()) == 0 {
+   		return result, fmt.Errorf("empty body")
+	}
     err := fastUnmarshal(c.Request.Body(), &result)
     return result, err
 }

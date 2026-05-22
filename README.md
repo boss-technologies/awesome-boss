@@ -44,7 +44,7 @@ func main() {
         return ctx.JSON(200, map[string]string{"message": "Привет от кота Босса! 🐈"})
     })
 
-    log.Fatal(app.Run(cfg.Addr))
+    log.Fatal(app.Run(fmt.Sprintf(":%d", cfg.Server.Port)))
 }
 ```
 

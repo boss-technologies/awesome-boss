@@ -28,7 +28,7 @@ func New{{.StoreName}}(pool *pgxpool.Pool) *{{.StoreName}} {
 {{end}}
 `
 
-const createMethod = `
+const createReturningMethod = `
 // Create вставляет новую запись и возвращает её с автосгенерированными полями.
 func (s *{{.StoreName}}) Create(ctx context.Context, m *{{.ModelName}}) (*{{.ModelName}}, error) {
 	row := s.pool.QueryRow(ctx,
@@ -40,8 +40,21 @@ func (s *{{.StoreName}}) Create(ctx context.Context, m *{{.ModelName}}) (*{{.Mod
 	if err != nil {
 		return nil, fmt.Errorf("create {{.TableName}}: %w", err)
 	}
-	{{.CopyBackFields}}
 	return &newM, nil
+}
+`
+
+const createSimpleMethod = `
+// Create вставляет новую запись и возвращает её.
+func (s *{{.StoreName}}) Create(ctx context.Context, m *{{.ModelName}}) (*{{.ModelName}}, error) {
+	_, err := s.pool.Exec(ctx,
+		` + "`INSERT INTO {{.TableName}} ({{.InsertColumns}}) VALUES ({{.InsertPlaceholders}})`" + `,
+		{{.InsertValues}},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create {{.TableName}}: %w", err)
+	}
+	return m, nil
 }
 `
 
@@ -242,16 +255,19 @@ func (qb *{{.ModelName}}QueryBuilder) whereClause() string {
 `
 
 const fieldWhereMethod = `
-// Where{{.FieldName}} добавляет условие для колонки "{{.ColumnName}}".
-func (qb *{{.ModelName}}QueryBuilder) Where{{.FieldName}}(op string, val {{.FieldType}}) *{{.ModelName}}QueryBuilder {
-	qb.where = append(qb.where, fmt.Sprintf("{{.ColumnName}} %s $%d", op, len(qb.args)+1))
-	qb.args = append(qb.args, val)
-	return qb
+// validateOp проверяет оператор сравнения, чтобы избежать SQL-инъекций.
+func (qb *{{.ModelName}}QueryBuilder) validateOp(op string) string {
+    switch op {
+    case "=", "!=", "<", ">", "<=", ">=", "LIKE", "ILIKE":
+        return op
+    default:
+        return "="
+    }
 }
 
-// AndWhere{{.FieldName}} добавляет условие с AND для колонки "{{.ColumnName}}".
-func (qb *{{.ModelName}}QueryBuilder) AndWhere{{.FieldName}}(op string, val {{.FieldType}}) *{{.ModelName}}QueryBuilder {
-	qb.where = append(qb.where, fmt.Sprintf("AND {{.ColumnName}} %s $%d", op, len(qb.args)+1))
+// Where{{.FieldName}} добавляет условие для колонки "{{.ColumnName}}".
+func (qb *{{.ModelName}}QueryBuilder) Where{{.FieldName}}(op string, val {{.FieldType}}) *{{.ModelName}}QueryBuilder {
+	qb.where = append(qb.where, fmt.Sprintf("{{.ColumnName}} %s $%d", qb.validateOp(op), len(qb.args)+1))
 	qb.args = append(qb.args, val)
 	return qb
 }

@@ -1,24 +1,15 @@
 package main
 
 import (
-	"context"
-	"flag"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"runtime"
-	"strings"
-	"time"
 
-	"github.com/boss-technologies/awesome-boss/auth"
-	bq "github.com/boss-technologies/awesome-boss/bossq"
-	"github.com/boss-technologies/awesome-boss/internal/bossq"
-	"github.com/joho/godotenv"
+	"github.com/boss-technologies/awesome-boss/cmd/handlers"
 )
 
 // ---------- ВЕРСИЯ ----------
-const version = "0.6.0"
+const version = "0.5.83"
 
 // ---------- ОСНОВНАЯ ФУНКЦИЯ (диспетчер команд) ----------
 func main() {
@@ -31,19 +22,19 @@ func main() {
 
 	switch command {
 	case "build":
-		handleBuild(os.Args[2:])
+		handlers.HandleBuild(os.Args[2:])
 	case "generate":
-		handleGenerate(os.Args[2:])
+		handlers.HandleGenerate(os.Args[2:])
+	case "migrations":
+		handlers.HandleMigrations(os.Args[2:])
+	case "make":
+		handlers.HandleMakeModels()
 	case "new":
-		handleNew(os.Args[2:])
+		handlers.HandleNew(os.Args[2:])
 	case "run":
-		handleRun()
+		handlers.HandleRun()
 	case "version":
 		handleVersion()
-	case "make":
-		handleMakeModels()
-	case "migrations":
-		handleMigrations(os.Args[2:])
 	default:
 		fmt.Printf("❌ Неизвестная команда: %s\n", command)
 		printUsage()
@@ -53,321 +44,25 @@ func main() {
 
 // ---------- ВЫВОД СПРАВКИ ----------
 func printUsage() {
-	fmt.Println(`🐱 Awesome Boss CLI v0.6.0
+	fmt.Println(`🐱 Awesome Boss CLI v0.7.0
 
 Использование:
   boss <команда> [аргументы]
 
 Доступные команды:
-  build       Собрать проект в оптимизированный бинарник
-  generate    Генерировать артефакты (ключи, модели)
-  migrations   Миграции
-  make        Сгенерировать Store моделий с помощью BossQ
-  new         Создать новый проект
-  run         Запустить сервер с горячей перезагрузкой
-  version     Показать версию
-  migrations   Миграции
+  build            Собрать проект в оптимизированный бинарник
+  generate key     Сгенерировать секретный ключ для BAT
+  migrations       Управление миграциями БД (Atlas)
+    make <name>      Создать миграцию по изменениям в моделях
+    use            Применить все новые миграции
+    rollback         Откатить последнюю миграцию
+  make             Сгенерировать Store для моделей (BossQ)
+  new <name>       Создать новый проект
+  run              Запустить сервер с горячей перезагрузкой
+  version          Показать версию
 
 Для справки по команде: boss <команда> -h
 `)
-}
-
-// ---------- 1. КОМАНДА build ----------
-func handleBuild(args []string) {
-	fs := flag.NewFlagSet("build", flag.ExitOnError)
-	output := fs.String("o", "", "имя выходного бинарника")
-	fs.Parse(args)
-
-	// Определяем имя выходного файла
-	outName := *output
-	if outName == "" {
-		// По умолчанию: имя текущей папки + .exe для Windows
-		dir, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка: %v\n", err)
-			os.Exit(1)
-		}
-		outName = filepath.Base(dir) + getExeSuffix()
-	}
-
-	// Собираем аргументы go build
-	buildArgs := []string{
-		"build",
-		"-ldflags=-s -w",
-		"-trimpath",
-		"-o", outName,
-	}
-
-	cmd := exec.Command("go", buildArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка сборки: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✅ Сборка завершена: %s\n", outName)
-}
-
-// ---------- 2. КОМАНДА generate (с подкомандой key) ----------
-func handleGenerate(args []string) {
-	if len(args) == 0 {
-		fmt.Println("❌ Укажите подкоманду: boss generate key")
-		os.Exit(1)
-	}
-	switch args[0] {
-	case "key":
-		handleGenerateKey(args[1:])
-	default:
-		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
-		os.Exit(1)
-	}
-}
-
-func handleGenerateKey(args []string) {
-	fs := flag.NewFlagSet("generate key", flag.ExitOnError)
-	jsonFlag := fs.Bool("json", false, "вывод в JSON формате (опционально)")
-	fs.Parse(args)
-
-	hexKey, err := auth.GenerateSecretKey()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка генерации ключа: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *jsonFlag {
-		// Простейший JSON вывод
-		fmt.Printf(`{"key": "%s", "note": "Сохраните этот ключ в переменную BOSS_AUTH_SECRET"}`+"\n", hexKey)
-	} else {
-		fmt.Println(hexKey)
-		fmt.Println("# Сохраните этот ключ в переменную окружения BOSS_AUTH_SECRET или в config.toml")
-	}
-}
-
-// ---------- 3. КОМАНДА migrations ----------
-func handleMigrations(args []string) {
-	if len(args) == 0 {
-		fmt.Println("❌ Укажите подкоманду: boss migrations [make|use|rollback]")
-		os.Exit(1)
-	}
-	switch args[0] {
-	case "make":
-		handleMakeMigrations(args[1:])   // передаём остаток аргументов
-	case "use":
-		handleUseMigrations()
-	case "rollback":
-		handleRollbackMigration()
-	default:
-		fmt.Printf("❌ Неизвестная подкоманда: %s\n", args[0])
-		os.Exit(1)
-	}
-}
-
-// handleMakeMigrations 
-func handleMakeMigrations(cmdArgs []string) {
-	fs := flag.NewFlagSet("migrations make", flag.ExitOnError)
-	nameFlag := fs.String("name", "auto", "имя миграции (будет добавлено к timestamp)")
-	_ = fs.Parse(cmdArgs) // разрешаем неизвестные флаги, но обрабатываем только --name
-
-	_ = godotenv.Load()
-
-	connString := os.Getenv("DATABASE_URL")
-	if connString == "" {
-		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	pool, err := bq.NewPool(ctx, connString)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
-		os.Exit(1)
-	}
-	defer pool.Close()
-
-	modelsDir := "models"
-	migrationsDir := "migrations"
-
-	// Пятый аргумент – имя миграции
-	if err := bq.MakeMigration(ctx, pool, modelsDir, migrationsDir, *nameFlag); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка создания миграции: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-// handleUseMigrations – применяет все неприменённые миграции
-func handleUseMigrations() {
-	_ = godotenv.Load()
-
-	connString := os.Getenv("DATABASE_URL")
-	if connString == "" {
-		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	pool, err := bq.NewPool(ctx, connString)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
-		os.Exit(1)
-	}
-	defer pool.Close()
-
-	migrationsDir := "migrations"
-	if err := bq.ApplyMigrations(ctx, pool, migrationsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка применения миграций: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-// handleRollbackMigration – откатывает последнюю миграцию
-func handleRollbackMigration() {
-	_ = godotenv.Load()
-
-	connString := os.Getenv("DATABASE_URL")
-	if connString == "" {
-		fmt.Fprintln(os.Stderr, "❌ Переменная окружения DATABASE_URL не установлена")
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	pool, err := bq.NewPool(ctx, connString)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка подключения к БД: %v\n", err)
-		os.Exit(1)
-	}
-	defer pool.Close()
-
-	migrationsDir := "migrations"
-	if err := bq.RollbackLastMigration(ctx, pool, migrationsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Ошибка отката миграции: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-
-// ---------- 4. КОМАНДА make ----------
-
-func handleMakeModels() {
-	root, _ := os.Getwd()
-	fmt.Printf("🔍 BossQ сканирует все папки в '%s'...\n", root)
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || !info.IsDir() {
-			return nil
-		}
-		// Пропускаем скрытые папки и папки с зависимостями
-		if strings.HasPrefix(info.Name(), ".") || info.Name() == "vendor" {
-			return filepath.SkipDir
-		}
-
-		// Проверяем, есть ли в этой папке хотя бы один .go-файл
-		if !hasGoFiles(path) {
-			// Если нет — просто идём дальше, без ошибки
-			return nil
-		}
-
-		if err := bossq.Generate(path); err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️ Ошибка в %s: %v\n", path, err)
-		}
-		return nil
-	})
-	fmt.Println("✅ BossQ завершил сканирование!")
-}
-
-// hasGoFiles возвращает true, если в директории есть хотя бы один файл с расширением .go
-func hasGoFiles(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
-			return true
-		}
-	}
-	return false
-}
-
-// ---------- 5. КОМАНДА new ----------
-func handleNew(args []string) {
-	fs := flag.NewFlagSet("new", flag.ExitOnError)
-	template := fs.String("t", "normal", "Шаблон проекта (normal, fintech)")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		fmt.Println("❌ Укажите имя проекта: boss new <имя> [-t шаблон]")
-		os.Exit(1)
-	}
-	projectName := fs.Arg(0)
-
-	if err := createProjectStructure(projectName, *template); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка создания структуры: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Переходим в папку проекта и инициализируем модуль
-	wd, _ := os.Getwd()
-	projectPath := filepath.Join(wd, projectName)
-	if err := os.Chdir(projectPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Chdir(wd)
-
-	// go mod init
-	if err := exec.Command("go", "mod", "init", projectName).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка go mod init: %v\n", err)
-		os.Exit(1)
-	}
-	// go get awesome-boss
-	if err := exec.Command("go", "get", "github.com/boss-technologies/awesome-boss@latest").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка добавления зависимости: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := exec.Command("go", "mod", "tidy").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка коррекции go mod tidy: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("✅ Проект %s создан. Перейдите в папку и выполните 'boss run'\n", projectName)
-	fmt.Println("/\\ /\\ Awesome Boss🐱")
-}
-
-// ---------- 6. КОМАНДА run ----------
-func handleRun() {
-	// Проверяем, есть ли main.go
-	if _, err := os.Stat("main.go"); os.IsNotExist(err) {
-		fmt.Fprintln(os.Stderr, "❌ Не найден main.go — убедитесь, что вы в папке проекта")
-		os.Exit(1)
-	}
-
-	// Ищем air
-	if airPath, err := exec.LookPath("air"); err == nil {
-		fmt.Println("🚀🔄 Запуск с hot-reload (air)...")
-		cmd := exec.Command(airPath)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка при запуске air: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Println("🚀 Запуск сервера (горячая перезагрузка не активна, установите air: go install github.com/cosmtrek/air@latest)")
-		cmd := exec.Command("go", "run", ".")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка при запуске: %v\n", err)
-			os.Exit(1)
-		}
-	}
 }
 
 // ---------- 7. КОМАНДА version ----------
@@ -376,271 +71,4 @@ func handleVersion() {
 	fmt.Printf("Версия Go: %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
-// ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
-
-func getExeSuffix() string {
-	if runtime.GOOS == "windows" {
-		return ".exe"
-	}
-	return ""
-}
-
-// createProjectStructure – копия из твоего new.go, почти без изменений
-func createProjectStructure(projectPath, templateType string) error {
-	// Создаём корневую папку
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
-		return err
-	}
-
-	// Создаём подпапки
-	dirs := []string{
-		filepath.Join(projectPath, "handlers"),
-		filepath.Join(projectPath, "models"),
-		filepath.Join(projectPath, "templates"),
-	}
-	if templateType == "fintech" {
-		dirs = append(dirs,
-			filepath.Join(projectPath, "middleware"),
-			filepath.Join(projectPath, "config"),
-		)
-	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	}
-
-	// main.go
-	mainContent := generateMain(templateType, projectPath)
-	if err := os.WriteFile(filepath.Join(projectPath, "main.go"), []byte(mainContent), 0644); err != nil {
-		return err
-	}
-
-	// Пример модели
-	modelContent := `package models
-
-// ExampleModel – пример модели. Замените на свои поля.
-type ExampleModel struct {
-    ID   int    ` + "`json:\"id\"`" + `
-    Name string ` + "`json:\"name\"`" + `
-}
-`
-	if templateType == "fintech" {
-		modelContent = `package models
-
-import "github.com/shopspring/decimal"
-
-// ExampleModel – пример модели для FinTech.
-type ExampleModel struct {
-    ID      int             ` + "`json:\"id\"`" + `
-    Amount  decimal.Decimal ` + "`json:\"amount\"`" + `
-    Status  string          ` + "`json:\"status\"`" + `
-}
-`
-	}
-	if err := os.WriteFile(filepath.Join(projectPath, "models", "example.go"), []byte(modelContent), 0644); err != nil {
-		return err
-	}
-
-	// Пример обработчика
-	handlerContent := `package handlers
-
-import (
-    "github.com/boss-technologies/awesome-boss/core"
-)
-
-// ExampleHandler – пример обработчика.
-func ExampleHandler(ctx *core.BossContext) error {
-    return ctx.JSON(200, map[string]string{"message": "Hello from Awesome Boss!"})
-}
-`
-	if err := os.WriteFile(filepath.Join(projectPath, "handlers", "example.go"), []byte(handlerContent), 0644); err != nil {
-		return err
-	}
-
-	// Шаблон index.html
-	htmlContent := `<!DOCTYPE html>
-<html>
-<head>
-    <title>Awesome Boss</title>
-</head>
-<body>
-    <h1>Добро пожаловать, разработчик!</h1>
-    <p>Эта страница была сделана на Fur</p>
-</body>
-</html>`
-	if err := os.WriteFile(filepath.Join(projectPath, "templates", "index.html"), []byte(htmlContent), 0644); err != nil {
-		return err
-	}
-
-	// Для fintech – middleware и config
-	if templateType == "fintech" {
-		auditContent := `package middleware
-
-import (
-    "log/slog"
-    "time"
-    "github.com/boss-technologies/awesome-boss"
-)
-
-func Audit(next awesomeboss.Handler) awesomeboss.Handler {
-    return func(ctx *awesomeboss.BossContext) error {
-        start := time.Now()
-        err := next(ctx)
-        slog.Info("request",
-            "method", ctx.Method(),
-            "path", ctx.Path(),
-            "status", ctx.Response.StatusCode(),
-            "duration_ms", time.Since(start).Milliseconds(),
-        )
-        return err
-    }
-}
-`
-		if err := os.WriteFile(filepath.Join(projectPath, "middleware", "audit.go"), []byte(auditContent), 0644); err != nil {
-			return err
-		}
-	}
-
-	// .gitignore
-	gitignoreContent := `# Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-.env
-
-# Test binary
-*.test
-
-# Output of the go coverage tool
-*.out
-
-# Dependency directories
-vendor/
-
-# Go workspace file
-go.work
-go.work.sum
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-`
-	if err := os.WriteFile(filepath.Join(projectPath, ".gitignore"), []byte(gitignoreContent), 0644); err != nil {
-		return err
-	}
-
-	// .env
-	envContent := `# Секретный ключ для BAT (сгенерируйте командой 'boss generate key')
-BOSS_AUTH_SECRET=
-DATABASE_URL=
-`
-	os.WriteFile(filepath.Join(projectPath, ".env"), []byte(envContent), 0644)
-
-	// boss.toml
-	tomlContent := `mode = "` + templateType + `"
-
-[server]
-port = 8080
-enable_gzip = true
-
-[auth]
-# secret_key будет взят из переменной окружения BOSS_AUTH_SECRET
-
-[database]
-# тоже будет взят из переменной окружения DATABASE_URL
-
-[logging]
-level = "debug"
-`
-	if err := os.WriteFile(filepath.Join(projectPath, "boss.toml"), []byte(tomlContent), 0644); err != nil {
-		return err
-	}
-
-	// README.md
-	readmeContent := "# " + filepath.Base(projectPath) + `
-
-Проект создан с помощью **Awesome Boss** – FinTech-фреймворка для Go.
-
-## Структура
-
-- ` + "`handlers/`" + ` – обработчики запросов
-- ` + "`models/`" + ` – модели данных
-- ` + "`templates/`" + ` – HTML-шаблоны (Fur)
-`
-	if templateType == "fintech" {
-		readmeContent += "- `middleware/` – дополнительная прослойка (аудит, аутентификация)\n- `config/` – конфигурация\n"
-	}
-	readmeContent += `
-## Запуск
-
-` + "```bash\nboss run\n```\n"
-
-	if err := os.WriteFile(filepath.Join(projectPath, "README.md"), []byte(readmeContent), 0644); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// generateMain – копия из твоего new.go
-func generateMain(templateType, projectName string) string {
-	if templateType == "fintech" {
-		return `package main
-
-import (
-    "fmt"
-    "log"
-    "` + projectName + `/handlers"
-    "github.com/boss-technologies/awesome-boss"
-    "github.com/boss-technologies/awesome-boss/config"
-)
-
-func main() {
-    cfg, err := config.LoadConfig("boss.toml")
-    if err != nil {
-        log.Fatalf("Ошибка загрузки конфигурации: %v", err)
-    }
-
-    app := awesomeboss.New(cfg) // режим fintech автоматом включит Audit
-
-    app.Get("/", handlers.ExampleHandler)
-
-    addr := fmt.Sprintf(":%d", cfg.Server.Port)
-    log.Fatal(app.Run(addr))
-}
-`
-	}
-	// normal
-	return `package main
-
-import (
-    "fmt"
-    "log"
-    "` + projectName + `/handlers"
-    "github.com/boss-technologies/awesome-boss"
-    "github.com/boss-technologies/awesome-boss/config"
-)
-
-func main() {
-    cfg, err := config.LoadConfig("boss.toml")
-    if err != nil {
-        log.Fatalf("Ошибка загрузки конфигурации: %v", err)
-    }
-
-    app := awesomeboss.New(cfg)
-
-    app.Get("/", handlers.ExampleHandler)
-    addr := fmt.Sprintf(":%d", cfg.Server.Port)
-    log.Fatal(app.Run(addr))
-}
-`
-}
+// Выполнено с любовью для Босса 🐈‍

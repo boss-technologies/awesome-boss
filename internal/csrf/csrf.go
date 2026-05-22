@@ -98,7 +98,9 @@ func SetCSRFTokenMiddleware(secretKey []byte) core.Middleware {
 // GenerateToken создаёт подписанный токен в формате "rawToken.hmacSignature".
 func GenerateToken(secretKey []byte) string {
     b := make([]byte, 32)
-    rand.Read(b)
+    if _, err := rand.Read(b); err != nil {
+        panic("csrf: cannot read random: " + err.Error())
+    }
     rawToken := hex.EncodeToString(b)
     signature := computeHMAC(rawToken, secretKey)
     return rawToken + "." + signature

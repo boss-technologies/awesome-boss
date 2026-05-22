@@ -93,3 +93,5 @@ func randomString(n int) string {
 	}
 	return hex.EncodeToString(b)[:n]
 }
+
+// Выполнено с любовью для Босса 🐈‍

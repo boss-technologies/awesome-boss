@@ -3,7 +3,6 @@ package fintech
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"time"
 
 	"github.com/boss-technologies/awesome-boss/core"
@@ -28,8 +27,7 @@ func AuditMiddleware(next core.Handler) core.Handler {
 			return err
 		}
 
-        userID := ctx.User
-
+		userID, _ := ctx.GetUserID()
         entry := audit.Entry[string]{
             Timestamp:  start,
             RequestID:  generateRequestID(),
@@ -37,7 +35,7 @@ func AuditMiddleware(next core.Handler) core.Handler {
             Path:       string(ctx.Path()),
             StatusCode: ctx.Response.StatusCode(),
             Duration:   time.Since(start).Milliseconds(),
-            UserID:     fmt.Sprintf("%v", userID), // безопасное преобразование any → string
+            UserID:     userID,
             RemoteIP:   ctx.RemoteIP().String(),
             UserAgent:  string(ctx.UserAgent()),
         }

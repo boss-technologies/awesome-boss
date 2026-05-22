@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -99,12 +98,10 @@ func (app *BossApp) Delete(path string, handler core.Handler) {
 }
 
 // WebSocket регистрирует маршрут для WebSocket-соединений.
-func (app *BossApp) WebSocket(path string, handler func(conn net.Conn)) {
-	// Используем готовый обработчик из нашего пакета bosssocket
-	wsHandler := bosssocket.WebSocketHandler(handler)
-	app.router.GET(path, wsHandler)
+func (app *BossApp) WebSocket(path string, handler bosssocket.HandlerFunc) {
+    wsHandler := bosssocket.WebSocketHandler(handler)
+    app.router.GET(path, wsHandler)
 }
-
 // Group создаёт новую группу маршрутов
 func (app *BossApp) Group(prefix ...string) *Group {
 	p := ""
@@ -145,11 +142,11 @@ func (g *Group) Delete(path string, handler core.Handler) *Group {
 }
 
 // WebSocket регистрирует маршрут для WebSocket-соединений в группу
-func (g *Group) WebSocket(path string, handler func(net.Conn)) *Group {
-	fullPath := g.prefix + path
-	wsHandler := bosssocket.WebSocketHandler(handler)
-	g.app.router.GET(fullPath, wsHandler)
-	return g
+func (g *Group) WebSocket(path string, handler bosssocket.HandlerFunc) *Group {
+    fullPath := g.prefix + path
+    wsHandler := bosssocket.WebSocketHandler(handler)
+    g.app.router.GET(fullPath, wsHandler)
+    return g
 }
 
 // addRoute добавляет маршрут с объединёнными middleware (глобальные + групповые)
