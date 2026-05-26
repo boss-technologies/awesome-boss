@@ -43,10 +43,6 @@ func HandleNew(args []string) {
 		fmt.Fprintf(os.Stderr, "Ошибка добавления зависимости: %v\n", err)
 		os.Exit(1)
 	}
-	if err := exec.Command("go", "get", "ariga.io/atlas-provider-gorm@latest").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка добавления atlas-provider-gorm: %v\n", err)
-		os.Exit(1)
-	}
 	if err := exec.Command("go", "mod", "tidy").Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Ошибка go mod tidy: %v\n", err)
 		os.Exit(1)
@@ -87,18 +83,18 @@ func createProjectStructure(projectPath, templateType string) error {
 	}
 
 	// Пример модели
-	modelContent := `package models
-
+	modelContent := `
 // ExampleModel – пример модели. Замените на свои поля.
+// bossq:table=examples
 type ExampleModel struct {
-    ID   int    ` + "`json:\"id\"`" + `
-    Name string ` + "`json:\"name\"`" + `
+    ID   int    ` + "`bossq:\"pk\"`" + `
+    Name string ` + "`bossq:\"unique\"`" + `
 }
 `
 	if templateType == "fintech" {
 		modelContent = `package models
 
-import "github.com/shopspring/decimal"
+import "github.com/boss-technologies/awesome-boss/decimal"
 
 // bossq:table=examples
 type ExampleModel struct {

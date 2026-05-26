@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -68,6 +69,11 @@ func Generate(dir string) error {
 		if err := writeStoreFile(model.SourceFile, model, modelMap); err != nil {
 			return fmt.Errorf("write store for %s: %w", model.ModelName, err)
 		}
+	}
+
+	cmd := exec.Command("goimports", "-w", "./...")
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: goimports failed: %v\n", err)
 	}
 	return nil
 }
@@ -533,6 +539,7 @@ func genQueryBuilder(m bossq.ModelInfo) (string, error) {
 	}
 	return buf.String(), nil
 }
+
 // ---------------------- Связи ----------------------
 func extractRelationTag(tag string) bossq.RelationInfo {
 	start := strings.Index(tag, `bossq:"`)
@@ -743,76 +750,76 @@ func typeToString(expr ast.Expr) string {
 func toSnakeCase(s string) string {
 	// Список часто встречающихся аббревиатур, которые должны оставаться в нижнем регистре без разбиения.
 	abbreviations := map[string]string{
-		"ID":  "id",
-		"URL": "url",
-		"URI": "uri",
-		"HTTP": "http",
+		"ID":    "id",
+		"URL":   "url",
+		"URI":   "uri",
+		"HTTP":  "http",
 		"HTTPS": "https",
-		"API": "api",
-		"JSON": "json",
-		"XML": "xml",
-		"SQL": "sql",
-		"UUID": "uuid",
-		"JWT": "jwt",
-		"CSV": "csv",
-		"HTML": "html",
-		"CSS": "css",
-		"JS": "js",
-		"PDF": "pdf",
-		"TXT": "txt",
-		"ZIP": "zip",
-		"RAR": "rar",
-		"EXE": "exe",
-		"BIN": "bin",
-		"IMG": "img",
-		"PNG": "png",
-		"JPG": "jpg",
-		"JPEG": "jpeg",
-		"GIF": "gif",
-		"SVG": "svg",
-		"MP3": "mp3",
-		"MP4": "mp4",
-		"AVI": "avi",
-		"MKV": "mkv",
-		"MOV": "mov",
-		"WAV": "wav",
-		"FLAC": "flac",
-		"OGG": "ogg",
-		"WEBM": "webm",
-		"WEBP": "webp",
-		"BMP": "bmp",
-		"ICO": "ico",
-		"TIF": "tif",
-		"TIFF": "tiff",
-		"PSD": "psd",
-		"AI": "ai",
-		"EPS": "eps",
-		"INDD": "indd",
-		"RAW": "raw",
-		"CR2": "cr2",
-		"NEF": "nef",
-		"ORF": "orf",
-		"SRW": "srw",
-		"ARW": "arw",
-		"DNG": "dng",
-		"MRW": "mrw",
-		"PEF": "pef",
-		"RAF": "raf",
-		"RW2": "rw2",
-		"X3F": "x3f",
-		"3FR": "3fr",
-		"FFF": "fff",
-		"DCR": "dcr",
-		"KDC": "kdc",
-		"MEF": "mef",
-		"MOS": "mos",
-		"NRW": "nrw",
-		"RWL": "rwl",
-		"SR2": "sr2",
-		"SRF": "srf",
-		"XMF": "xmf",
-		"ERF": "erf",
-		"IIQ": "iiq",
+		"API":   "api",
+		"JSON":  "json",
+		"XML":   "xml",
+		"SQL":   "sql",
+		"UUID":  "uuid",
+		"JWT":   "jwt",
+		"CSV":   "csv",
+		"HTML":  "html",
+		"CSS":   "css",
+		"JS":    "js",
+		"PDF":   "pdf",
+		"TXT":   "txt",
+		"ZIP":   "zip",
+		"RAR":   "rar",
+		"EXE":   "exe",
+		"BIN":   "bin",
+		"IMG":   "img",
+		"PNG":   "png",
+		"JPG":   "jpg",
+		"JPEG":  "jpeg",
+		"GIF":   "gif",
+		"SVG":   "svg",
+		"MP3":   "mp3",
+		"MP4":   "mp4",
+		"AVI":   "avi",
+		"MKV":   "mkv",
+		"MOV":   "mov",
+		"WAV":   "wav",
+		"FLAC":  "flac",
+		"OGG":   "ogg",
+		"WEBM":  "webm",
+		"WEBP":  "webp",
+		"BMP":   "bmp",
+		"ICO":   "ico",
+		"TIF":   "tif",
+		"TIFF":  "tiff",
+		"PSD":   "psd",
+		"AI":    "ai",
+		"EPS":   "eps",
+		"INDD":  "indd",
+		"RAW":   "raw",
+		"CR2":   "cr2",
+		"NEF":   "nef",
+		"ORF":   "orf",
+		"SRW":   "srw",
+		"ARW":   "arw",
+		"DNG":   "dng",
+		"MRW":   "mrw",
+		"PEF":   "pef",
+		"RAF":   "raf",
+		"RW2":   "rw2",
+		"X3F":   "x3f",
+		"3FR":   "3fr",
+		"FFF":   "fff",
+		"DCR":   "dcr",
+		"KDC":   "kdc",
+		"MEF":   "mef",
+		"MOS":   "mos",
+		"NRW":   "nrw",
+		"RWL":   "rwl",
+		"SR2":   "sr2",
+		"SRF":   "srf",
+		"XMF":   "xmf",
+		"ERF":   "erf",
+		"IIQ":   "iiq",
 	}
 
 	// Прямое совпадение
@@ -853,4 +860,5 @@ func toSnakeCase(s string) string {
 	}
 	return string(result)
 }
+
 // Выполнено с любовью для Босса 🐈‍

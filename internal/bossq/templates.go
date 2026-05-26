@@ -10,7 +10,7 @@ import (
 	"strings" 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
+	"github.com/boss-technologies/awesome-boss/decimal"
 	"github.com/boss-technologies/awesome-boss/core"
 )
 
