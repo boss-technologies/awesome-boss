@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/shopspring/decimal"
+	"database/sql/driver"
 )
 
 // Decimal — неизменяемый тип для точных денежных вычислений.
@@ -18,9 +19,32 @@ func NewDecimal(value decimal.Decimal) Decimal {
 	return Decimal{d: value}
 }
 
-// Value возвращает внутреннее значение decimal.Decimal.
-func (d Decimal) Value() decimal.Decimal {
-	return d.d // неизменяемый, копия не нужна
+// Scan реализует интерфейс pgx.Scanner
+func (d *Decimal) Scan(src any) error {
+    if src == nil {
+        d.d = decimal.Zero
+        return nil
+    }
+    var s string
+    switch v := src.(type) {
+    case string:
+        s = v
+    case []byte:
+        s = string(v)
+    default:
+        return fmt.Errorf("decimal: cannot scan %T into Decimal", src)
+    }
+    dec, err := decimal.NewFromString(s)
+    if err != nil {
+        return err
+    }
+    d.d = dec
+    return nil
+}
+
+// Value реализует driver.Valuer
+func (d Decimal) Value() (driver.Value, error) {
+    return d.d.String(), nil
 }
 
 // String возвращает строковое представление.
@@ -126,5 +150,4 @@ func FromString(s string) (Decimal, error) {
 	}
 	return Decimal{d: d}, nil
 }
-
 // Выполнено с любовью для Босса 🐈‍
